@@ -1,8 +1,8 @@
 """Configuración del BE (convención del spine): `config.toml` + override env.
 
-Sección `[scan]` implementada en esta story; el resto de secciones del
-`config.toml.example` entra con sus stories de consumo. Sin fichero, se usan
-los defaults de código (escaneo cada 600 s, TTL 60 s, rango 192.168.1.0/24).
+Sección `[scan]` (1.2), `[db]` y `[auth]` (1.4). Sin fichero, se usan los
+defaults de código (escaneo cada 600 s, TTL 60 s, rango 192.168.1.0/24,
+DB `wakemeup.db` en CWD, backoff 5 fallos/5 min → 429/15 min).
 """
 from __future__ import annotations
 
@@ -35,8 +35,22 @@ class ScanSettings(BaseModel):
     ttl_seconds: int = Field(default=60, ge=15, le=300)
 
 
+class DbSettings(BaseModel):
+    """Sección `[db]` del config.toml (story 1.4: ruta del SQLite, AD-7)."""
+
+    path: str = "wakemeup.db"
+
+
+class AuthSettings(BaseModel):
+    """Sección `[auth]` del config.toml (backoff de autenticación, FR-10/AD-6)."""
+
+    max_failures: int = Field(default=5, ge=1)
+    window_seconds: int = Field(default=300, ge=1)
+    block_seconds: int = Field(default=900, ge=1)
+
+
 class Settings(BaseSettings):
-    """Configuración completa; la sección `[scan]` se implementa en esta story."""
+    """Configuración completa; `[scan]` desde la story 1.2, `[db]`/`[auth]` desde 1.4."""
 
     model_config = SettingsConfigDict(
         env_prefix="WAKEMEUP_",
@@ -45,6 +59,8 @@ class Settings(BaseSettings):
     )
 
     scan: ScanSettings = Field(default_factory=ScanSettings)
+    db: DbSettings = Field(default_factory=DbSettings)
+    auth: AuthSettings = Field(default_factory=AuthSettings)
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):

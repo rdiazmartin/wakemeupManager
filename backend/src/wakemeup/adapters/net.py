@@ -242,3 +242,55 @@ class Net:
                 )
             except asyncio.TimeoutError:
                 return None
+
+    async def wol_interface(self) -> str | None:
+        """Interfaz Ethernet emisora WOL (FR-5, reporte parcial 1.4).
+
+        Read-only y sin root: `ip -o link show` + estado UP de cada enlace.
+        Solo se reporta una Ethernet si está en `state UP` (carrier presente);
+        si no hay ninguna (o el binario no está), devuelve `None` → el
+        healthcheck reporta `warning` (WOL no fiable vía WiFi). Nunca bloquea.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ip", "-o", "link", "show",
+                stdout=asyncio.subprocess.PIPE,
+            )
+        except OSError:
+            logger.warning("binario `ip` no disponible; sin reporte de interfaz WOL")
+            return None
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=_SUBPROCESS_TIMEOUT)
+        except asyncio.TimeoutError:
+            proc.kill()
+            logger.error("timeout en `ip link`")
+            return None
+        if proc.returncode != 0:
+            logger.error("`ip link` falló: rc=%s", proc.returncode)
+            return None
+
+        # `eth0@if2: <BROADCAST,MULTICAST,UP,LOWER_UP> ... state UP ...` →
+        # nombre = parts[1] sin ':' ; flags = parts[2] (sí, el índice 2:
+        # split de "2: eth0: <FLAGS> mtu ..."); estado = tras "state". Solo
+        # las Ethernet físicas con carrier (state UP) emiten WOL fiable.
+        for line in stdout.decode(errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            name = parts[1].rstrip(":")
+            flags = parts[2]
+            state = None
+            for i, part in enumerate(parts):
+                if part == "state" and i + 1 < len(parts):
+                    state = parts[i + 1]
+                    break
+            if name == "lo":
+                continue
+            if not (name.startswith("eth") or name.startswith("en")):
+                continue
+            if "UP" not in flags or state != "UP":
+                logger.info("interfaz %s sin carrier (WOL no fiable); se omite", name)
+                continue
+            return name
+        logger.info("sin interfaz Ethernet con carrier (WOL no fiable); healthcheck reporta warning")
+        return None

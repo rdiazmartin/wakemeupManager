@@ -2,7 +2,8 @@
 
 Inventario de máquinas con upsert no destructivo (nunca borra): un host que
 deja de responder permanece en la tabla; el borrado solo existe vía DELETE
-explícito (AD-3), fuera del alcance de esta story.
+explícito (AD-3), fuera del alcance de la story 1.2. Tokens de dispositivo
+(1.4): solo el hash SHA-256 de la representación hex-lower (AD-6).
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from wakemeup.core.models import Machine
+from wakemeup.core.models import Machine, Token
 
 _DEFAULT_DB_PATH = Path("wakemeup.db")
 
@@ -24,10 +25,17 @@ CREATE TABLE IF NOT EXISTS machines (
     status_checked_at TEXT,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_name TEXT NOT NULL UNIQUE,
+    token_sha256 TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+);
 """
 
-# Migración segura para DBs creadas por la story 1.2 (sin las columnas de
-# estado): ALTER TABLE solo de las columnas ausentes (ver `_migrate`).
+# Migración de esquema para DBs creadas por stories anteriores: ALTER/creación
+# solo de lo ausente (ver `_migrate`).
 _COLUMN_MIGRATIONS = {
     "state": "ALTER TABLE machines ADD COLUMN state TEXT NOT NULL DEFAULT 'offline';",
     "status_checked_at": "ALTER TABLE machines ADD COLUMN status_checked_at TEXT;",
@@ -51,6 +59,16 @@ _LIST = "SELECT id, ip, mac, hostname, state, status_checked_at FROM machines OR
 
 _GET_STATUS = "SELECT state, status_checked_at FROM machines WHERE ip = ?;"
 
+_INSERT_TOKEN = "INSERT INTO tokens (device_name, token_sha256, created_at, revoked_at) VALUES (?, ?, ?, ?);"
+
+_TOKEN_EXISTS = "SELECT 1 FROM tokens WHERE token_sha256 = ? AND revoked_at IS NULL;"
+
+_REVOKE_TOKEN = "UPDATE tokens SET revoked_at = ? WHERE token_sha256 = ? AND revoked_at IS NULL;"
+
+_REVOKE_TOKEN_NAME = "UPDATE tokens SET revoked_at = ? WHERE device_name = ? AND revoked_at IS NULL;"
+
+_LIST_TOKENS = "SELECT id, device_name, token_sha256, created_at, revoked_at FROM tokens ORDER BY id;"
+
 
 class Db:
     """Conexión a SQLite (aiosqlite). Abrir con `init_db`, cerrar con `close`."""
@@ -69,11 +87,19 @@ class Db:
         await self._conn.commit()
 
     async def _migrate(self) -> None:
-        """Añade solo las columnas de estado ausentes (DBs de la story 1.2).
+        """Evoluciona DBs creadas por stories anteriores (1.2/1.3 → 1.4).
 
-        Consulta `PRAGMA table_info` en lugar de tragar cualquier error de
-        ALTER: un fallo real (DB bloqueada, disco lleno...) se propaga.
+        Añade solo las columnas de estado ausentes y crea la tabla `tokens`
+        (ausente en DBs 1.2/1.3). Consulta `PRAGMA table_info` en lugar de
+        tragar cualquier error de ALTER: un fallo real (DB bloqueada, disco
+        lleno...) se propaga.
         """
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        await self._migrate_machines()
+        await self._migrate_tokens()
+
+    async def _migrate_machines(self) -> None:
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
         rows = await self._conn.execute_fetchall("PRAGMA table_info(machines);")
@@ -81,6 +107,16 @@ class Db:
         for column, ddl in _COLUMN_MIGRATIONS.items():
             if column not in existing:
                 await self._conn.execute(ddl)
+
+    async def _migrate_tokens(self) -> None:
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        await self._conn.executescript("CREATE TABLE IF NOT EXISTS tokens ("
+                                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                                       "device_name TEXT NOT NULL UNIQUE,"
+                                       "token_sha256 TEXT NOT NULL UNIQUE,"
+                                       "created_at TEXT NOT NULL,"
+                                       "revoked_at TEXT);")
 
     async def begin(self) -> None:
         """Inicia una transacción explícita (los upserts se agrupan en _run)."""
@@ -144,6 +180,60 @@ class Db:
             _UPSERT_STATUS,
             (state, _now_iso(), ip),
         )
+
+    async def create_token(self, device_name: str, token_sha256: str) -> None:
+        """Registra un token por su hash (AD-6). El token plano no toca la BD."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        await self._conn.execute(
+            _INSERT_TOKEN, (device_name, token_sha256, _now_iso(), None)
+        )
+
+    async def token_exists(self, token_sha256: str) -> bool:
+        """¿Hay un token activo (no revocado) con este hash?"""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        row = await self._conn.execute_fetchall(
+            _TOKEN_EXISTS, (token_sha256,)
+        )
+        return bool(row)
+
+    async def revoke_token(self, token_sha256: str) -> bool:
+        """Revoca el token cuyo hash coincide; `True` si existía y se revocó.
+
+        Un token ya revocado o inexistente devuelve `False` sin error.
+        """
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        cursor = await self._conn.execute(
+            _REVOKE_TOKEN, (_now_iso(), token_sha256)
+        )
+        return cursor.rowcount > 0
+
+    async def revoke_token_by_name(self, device_name: str) -> bool:
+        """Revoca por nombre de dispositivo (CLI); `False` si no existe/ya revocado."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        cursor = await self._conn.execute(
+            _REVOKE_TOKEN_NAME, (_now_iso(), device_name)
+        )
+        return cursor.rowcount > 0
+
+    async def list_tokens(self) -> list[Token]:
+        """Tokens registrados (activos y revocados), ordenados por creación."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        rows = await self._conn.execute_fetchall(_LIST_TOKENS)
+        return [
+            Token(
+                id=r[0],
+                device_name=r[1],
+                token_sha256=r[2],
+                created_at=r[3],
+                revoked_at=r[4],
+            )
+            for r in rows
+        ]
 
 
 def _now_iso() -> str:

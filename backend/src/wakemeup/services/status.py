@@ -122,6 +122,11 @@ class StatusService:
         self._periodic = asyncio.create_task(_loop())
         return self._periodic
 
+    def stop(self) -> None:
+        """Cancela el loop periódico (lifespan de la app FastAPI)."""
+        if self._periodic is not None and not self._periodic.done():
+            self._periodic.cancel()
+
     def _is_fresh(self, checked_at: str | None) -> bool:
         """¿La marca de comprobación está dentro del TTL?"""
         if checked_at is None:

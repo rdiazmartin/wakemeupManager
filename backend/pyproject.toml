@@ -15,6 +15,9 @@ dependencies = [
     # ipaddress: stdlib (redes del descubrimiento; sin dependencia extra)
 ]
 
+[project.scripts]
+wakemeup-cli = "wakemeup.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/wakemeup"]
 

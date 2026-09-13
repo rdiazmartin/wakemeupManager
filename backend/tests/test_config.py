@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from wakemeup.config import ScanSettings, Settings
+from wakemeup.config import AuthSettings, ScanSettings, Settings
 
 
 def test_defaults_without_config_file(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,3 +46,33 @@ def test_scan_settings_bounds() -> None:
     """Bounds del AD-2/FR-2: TTL entre 15 y 300 s."""
     with pytest.raises(ValidationError):
         ScanSettings(ttl_seconds=5)
+
+
+def test_db_section_defaults_and_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Sección `[db]` (story 1.4): default CWD y override TOML/env.
+
+    CIERRA el deferred-work de 1.2 (ruta SQLite CWD-relative): la ruta es
+    configurable y el default conserva el comportamiento actual.
+    """
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: "/nonexistent/config.toml")
+    assert Settings().db.path == "wakemeup.db"
+
+    toml = tmp_path / "config.toml"
+    toml.write_text('[db]\npath = "/var/lib/wakemeup/wakemeup.db"\n')
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: str(toml))
+    assert Settings().db.path == "/var/lib/wakemeup/wakemeup.db"
+
+    monkeypatch.setenv("WAKEMEUP_DB__PATH", "/tmp/otra.db")
+    assert Settings().db.path == "/tmp/otra.db"
+
+
+def test_auth_section_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sección `[auth]`: defaults del backoff (FR-10/AD-6) y bounds."""
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: "/nonexistent/config.toml")
+    settings = Settings()
+    assert settings.auth.max_failures == 5
+    assert settings.auth.window_seconds == 300
+    assert settings.auth.block_seconds == 900
+    with pytest.raises(ValidationError):
+        AuthSettings(max_failures=0)
+

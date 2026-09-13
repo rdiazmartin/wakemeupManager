@@ -74,6 +74,24 @@ class DiscoveryService:
         """¿Hay un escaneo corriendo ahora mismo?"""
         return self._in_flight
 
+    @property
+    def current_task(self) -> asyncio.Task[int] | None:
+        """Tarea del escaneo en curso (estado real, deferred 1.2).
+
+        A diferencia de `in_flight` —que se limpia al terminar el barrido de
+        pings, antes del upsert—, esto devuelve la tarea viva mientras el
+        escaneo completo no finaliza. El endpoint `POST /scan` lo usa para
+        responder 202 `running: true` sin lanzar un segundo escaneo.
+        """
+        if self._current is not None and not self._current.done():
+            return self._current
+        return None
+
+    def stop(self) -> None:
+        """Cancela el loop periódico (lifespan de la app FastAPI)."""
+        if self._periodic is not None and not self._periodic.done():
+            self._periodic.cancel()
+
     def periodic_task(self) -> asyncio.Task:
         """Loop periódico (FR-3): escanea al arrancar y redispara cada interval_seconds.
 

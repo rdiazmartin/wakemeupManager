@@ -194,6 +194,23 @@ async def test_check_cycle_is_idempotent(db):
 
 
 @pytest.mark.asyncio
+async def test_stop_cancels_check_cycle(db):
+    """stop() (verification-gap 1.4): cancela el loop real de estado."""
+    net = FakeNet(alive={"192.168.1.10"})
+    svc = StatusService(net=net, db=db, scan=ScanSettings(ttl_seconds=16))
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    task = svc.check_cycle(interval_seconds=1)
+    await asyncio.sleep(0.2)
+    assert len(net.ping_calls) >= 1
+
+    svc.stop()
+    await asyncio.sleep(0)  # cede el ciclo al event loop para entregar el cancel
+    assert task.cancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
 async def test_check_all_rollback_on_mid_sweep_failure(db):
     """Triage 1.3: un ping que falla a mitad del barrido revierte el lote
     entero y no deja escrituras parciales."""

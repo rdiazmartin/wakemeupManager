@@ -169,6 +169,58 @@ async def test_second_scan_waits_for_in_flight(db):
 
 
 @pytest.mark.asyncio
+async def test_current_task_reflects_live_scan_including_upsert(db):
+    """current_task (deferred 1.2, verification-gap 1.4): durante el escaneo
+    completo —incluida la fase de upsert— la propiedad devuelve la tarea viva,
+    y tras terminar devuelve None."""
+    class SlowDb(Db):
+        def __init__(self, path) -> None:
+            super().__init__(path)
+            self.release_upsert = asyncio.Event()
+
+        async def upsert_machine(self, ip, mac=None, hostname=None):
+            await asyncio.wait_for(self.release_upsert.wait(), timeout=2)
+            return await super().upsert_machine(ip, mac, hostname)
+
+    slow_db = SlowDb(path=db._path)
+    await slow_db.init_db()
+    net = FakeNet([HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10")])
+    svc = DiscoveryService(net=net, db=slow_db, scan=ScanSettings())
+
+    first = asyncio.create_task(svc.scan())
+    await asyncio.sleep(0.05)
+    # escaneo en marcha, bloqueado en el upsert → la TAREA queda viva aunque
+    # in_flight ya es False (justo el hueco que cerraba el deferred 1.2).
+    assert svc.in_flight is False
+    assert svc.current_task is not None
+    assert not svc.current_task.done()
+
+    slow_db.release_upsert.set()
+    assert await first == 1
+    assert svc.current_task is None
+
+    await slow_db.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_periodic_loop(db):
+    """stop() (verification-gap 1.4): cancela el loop periódico real."""
+    net = FakeNet([HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10")])
+    svc = DiscoveryService(
+        net=net, db=db, scan=ScanSettings(interval_seconds=1, ttl_seconds=60)
+    )
+    task = svc.periodic_task()
+    await asyncio.sleep(0.2)
+    assert len(net.scans) >= 1
+
+    svc.stop()
+    await asyncio.sleep(0)  # cede el ciclo al event loop para entregar el cancel
+    assert task.cancelled()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
 async def test_periodic_loop_calls_scan(db, tmp_path):
     net = FakeNet([HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10")])
     svc = DiscoveryService(

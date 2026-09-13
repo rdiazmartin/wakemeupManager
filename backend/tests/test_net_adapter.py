@@ -4,6 +4,8 @@ Cubren la matriz del spec: host activo, host apagado, IP propia excluida
 (interfaces del BE, tailnet/loopback), ARP sin entrada para un ping OK,
 rango no-LAN excluido y degradación a ARP-only cuando el ping no-root falla.
 """
+import asyncio
+
 import pytest
 
 from wakemeup.adapters.net import Net, _PingOutcome
@@ -182,3 +184,128 @@ async def test_own_interfaces_parses_ip_addr_output(monkeypatch):
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec_rc)
     assert await Net().own_interfaces() == set()
+
+
+@pytest.mark.asyncio
+async def test_wol_interface_returns_ethernet_if_up(monkeypatch):
+    """FR-5 parcial: eth0 con carrier (state UP) → 'eth0'."""
+    link_output = (
+        "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default\n"
+        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default\n"
+        "3: tailscale0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1280 qdisc fq_codel state UNKNOWN group default\n"
+    )
+
+    class FakeProc:
+        async def communicate(self):
+            return link_output.encode(), b""
+
+    async def fake_exec(*_args, **kwargs):
+        proc = FakeProc()
+        proc.returncode = 0
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    assert await Net().wol_interface() == "eth0"
+
+
+@pytest.mark.asyncio
+async def test_wol_interface_skips_carrierless_ethernet(monkeypatch):
+    """eth0 sin cable (NO-CARRIER/DOWN) no se reporta aunque haya wlan0 UP."""
+    link_output = (
+        "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default\n"
+        "2: eth0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc fq_codel state DOWN mode DEFAULT group default\n"
+        "3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default\n"
+    )
+
+    class FakeProc:
+        async def communicate(self):
+            return link_output.encode(), b""
+
+    async def fake_exec(*_args, **kwargs):
+        proc = FakeProc()
+        proc.returncode = 0
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    assert await Net().wol_interface() is None
+
+
+@pytest.mark.asyncio
+async def test_wol_interface_none_if_only_wireless_up(monkeypatch):
+    """Solo wireless UP → None e informa warning sin romper el healthcheck."""
+    link_output = (
+        "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default\n"
+        "2: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP mode DEFAULT group default\n"
+    )
+
+    class FakeProc:
+        async def communicate(self):
+            return link_output.encode(), b""
+
+    async def fake_exec(*_args, **kwargs):
+        proc = FakeProc()
+        proc.returncode = 0
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    assert await Net().wol_interface() is None
+
+
+@pytest.mark.asyncio
+async def test_wol_interface_degrades_when_ip_missing(monkeypatch):
+    """Binario `ip` ausente → None sin excepción (degradación)."""
+    import builtins
+
+    async def fake_exec(*_args, **kwargs):
+        raise FileNotFoundError("ip")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    assert await Net().wol_interface() is None
+
+
+@pytest.mark.asyncio
+async def test_wol_interface_kills_lingering_procs_on_timeout(monkeypatch):
+    """Timeout en `ip link` → mata el subproceso colgado y degrada a None."""
+    killed = []
+
+    class FakeSlowProc:
+        async def communicate(self):
+            await asyncio.sleep(30)  # nunca termina → timeout
+
+        def kill(self):
+            killed.append(True)
+
+    async def fake_exec(*_args, **kwargs):
+        proc = FakeSlowProc()
+        proc.returncode = 1
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    assert await Net().wol_interface() is None
+    assert killed == [True]
+
+
+@pytest.mark.asyncio
+async def test_wol_interface_degrades_on_ip_rc_nonzero(monkeypatch):
+    """`ip -o link` con rc!=0 → None (degradación, nunca excepción)."""
+    class FakeProc:
+        async def communicate(self):
+            return b"", b"error"
+
+    async def fake_exec(*_args, **kwargs):
+        proc = FakeProc()
+        proc.returncode = 1
+        return proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    assert await Net().wol_interface() is None
+
+
+@pytest.mark.asyncio
+async def test_wol_interface_degrades_on_oserror_not_filenotfound(monkeypatch):
+    """PermissionError (u otro OSError) al ejecutar `ip` → None sin excepción."""
+    async def fake_exec(*_args, **kwargs):
+        raise PermissionError("ip sin permiso")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
+    assert await Net().wol_interface() is None

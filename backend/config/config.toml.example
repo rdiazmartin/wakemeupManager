@@ -12,6 +12,11 @@ interval_seconds = 600
 # se comprueba cada ttl_seconds/2 y el estado caduca a los ttl_seconds.
 ttl_seconds = 60
 
+[db]
+# Ruta del fichero SQLite (AD-7). Default: "wakemeup.db" relativo al CWD;
+# en despliegue systemd el WorkingDirectory es /var/lib/wakemeup (story 4.1).
+path = "wakemeup.db"
+
 [api]
 # Interfaz a la que se vincula el BE (FR-9, AD-6): solo tailnet + loopback.
 # P. ej. "100.100.100.1,127.0.0.1".
