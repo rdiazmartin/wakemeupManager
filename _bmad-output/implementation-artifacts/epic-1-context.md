@@ -4,7 +4,7 @@
 
 ## Goal
 
-Tras este epic, el usuario abre la app Android y ve todas las máquinas de su red con su estado online/offline — actualizado solo por el backend — pudiendo forzar un escaneo desde el móvil. Cubre la base del sistema: esqueleto hexagonal del BE, descubrimiento de máquinas por LAN física, mantenimiento de estado con TTL, la API de inventario autenticada por token de dispositivo y el listado+configuración de conexión en la app. Es el fundamento sobre el que los epics 2 (wake/shutdown/alta) y 3 (MCP/SSE) construyen. FRs cubiertos: FR-1, FR-2, FR-3, FR-5 (parcial: reporte de interfaz WOL), FR-12.
+Tras este epic, el usuario abre la app Android y ve todas las máquinas de su red con su estado online/offline — actualizado solo por el backend — pudiendo forzar un escaneo desde el móvil. Cubre la base del sistema: esqueleto hexagonal del BE, descubrimiento de máquinas por LAN física, mantenimiento de estado con TTL, la API de inventario autenticada por token de dispositivo y el listado + configuración de conexión en la app. Es el fundamento sobre el que los epics 2 (wake/shutdown/alta), 3 (MCP/SSE) y 4 (lanzamiento) construyen. FRs cubiertos: FR-1, FR-2, FR-3, FR-5 (parcial: reporte de interfaz WOL), FR-12.
 
 ## Stories
 
@@ -48,4 +48,4 @@ Tras este epic, el usuario abre la app Android y ve todas las máquinas de su re
 - **1.2 alimenta 1.3**: el descubrimiento produce el inventario sobre el que el estado (TTL/2) opera; ambos son prerequisito de 1.4 (el listado de la API expone el estado).
 - **1.4 es consumido por la app**: 1.5 (listado/poll/scan) depende del contrato `GET /machines` + DTO completo y de `POST /scan`; 1.6 (config) depende de `GET /status` y del mismo mecanismo de tokens.
 - **Hacia Epic 2**: el estado no_fiable y el reporte de interfaz WOL en `GET /status` (1.4) sustentan wake/shutdown; el DTO de máquina fijado en 1.4 es el wire model que Epic 2 extiende con acciones.
-- **Hacia Epic 3**: el escaneo terminado y los cambios de estado de este epic serán fuentes de eventos del bus SSE.
+- **Hacia Epic 3**: el escaneo terminado y los cambios de estado de este epic serán fuentes de eventos del bus SSE (el bus etiqueta cada evento con origen `api|mcp|scan|periodic`, que Epic 3 usa para notificaciones); el patrón de tokens de 1.4 se replica para el token MCP.

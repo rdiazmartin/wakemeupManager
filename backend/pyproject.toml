@@ -11,6 +11,8 @@ dependencies = [
     "fastapi>=0.141",
     "uvicorn>=0.34",
     "pydantic-settings>=2.6",
+    "aiosqlite>=0.22",
+    # ipaddress: stdlib (redes del descubrimiento; sin dependencia extra)
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -19,8 +21,10 @@ packages = ["src/wakemeup"]
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=1.0",
     "httpx>=0.28",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
