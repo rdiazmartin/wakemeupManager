@@ -114,7 +114,7 @@ Después de este epic, el usuario da de alta una máquina (una sola vez, con cre
 
 ### Epic 3: Agente IA en la red — MCP y eventos en vivo
 Después de este epic, un agente IA conectado desde dentro de la VPN consulta y controla las máquinas vía MCP, y cualquier cambio de estado (suyo, de la app o del escaneo) se refleja al instante en la app Android.
-**FRs covered:** FR-16, FR-17, FR-18
+**FRs covered:** FR-16, FR-17, FR-18 (3.5 notificación MCP)
 
 ### Epic 4: Lanzamiento pulido — distribuir la herramienta con confianza
 Después de este epic, la app se distribuye públicamente: primer arranque guiado, estados de error claros, accesibilidad completa, bilingüe ES/EN y despliegue operacional del BE robusto (systemd, install/upgrade, healthcheck).
@@ -450,4 +450,21 @@ So que nadie se quede fuera al distribuirse la herramienta.
 **And** los targets táctiles miden ≥48dp; con Dynamic Type al máximo la fila mantiene legibilidad sin truncar controles (UX-DR8)
 **And** con Reduce Motion activo, el icono de escaneo no gira: se sustituye por texto "Escaneando…" y los diálogos no transicionan (UX-DR8)
 **And** tests Robolectric (semántica de contenido, tamaños de target) — requisito transversal de tests
+**And** commit + push al finalizar (requisito transversal)
+
+### Story 3.5: Notificación del sistema para cambios del MCP
+
+As a usuario,
+I want una notificación del sistema cada vez que el agente IA apague o encienda una máquina,
+So que sepa quién la cambió aunque no esté mirando la app.
+
+**Acceptance Criteria:**
+
+**Given** la app con el permiso de notificaciones concedido y suscripción SSE activa
+**When** llega un evento del stream con origen `mcp` (el agente IA apaga/enciende una máquina o force_scan cambia un estado)
+**Then** la app muestra una notificación del sistema (bandeja, con la app abierta o en segundo plano): "«máquina» — El agente IA <acción>" (FR-18)
+**And** la fila de la máquina se actualiza igualmente (reflejo SSE, con o sin notificación)
+**And** los eventos de otros orígenes (otro dispositivo, escaneo periódico) NO generan notificación, solo actualizan la fila (FR-18)
+**And** si el permiso `POST_NOTIFICATIONS` está denegado: no hay notificación pero el estado se refleja; la app sugiere activarlo desde ajustes (FR-18)
+**And** tests Robolectric: evento con origen `mcp` → notificación emitida al gestor de notificaciones; origen `api`/`scan` → sin notificación — requisito transversal de tests
 **And** commit + push al finalizar (requisito transversal)

@@ -292,18 +292,21 @@ El MCP solo escucha en la interfaz de la tailnet (y loopback) y exige su token d
 - El token de MCP se genera y revoca por la CLI del BE, de forma independiente de los tokens de dispositivo (FR-10b); se muestra una sola vez.
 - No hay acceso del MCP desde la LAN física ni desde fuera de la VPN.
 
-#### FR-18: Eventos push de cambios de estado
+#### FR-18: Eventos push de cambios de estado y notificación de acciones del MCP
 
-El BE transmite a la app los cambios de estado (online/offline/no_fiable, alta completada, escaneo terminado) tan pronto como ocurren, vía SSE sobre la tailnet; la app lo refleja en la lista.
+El BE transmite a la app los cambios de estado (online/offline/no_fiable, alta completada, escaneo terminado) tan pronto como ocurren, vía SSE sobre la tailnet; la app lo refleja en la lista. Los cambios de estado originados por el **MCP** se notifican además con una notificación del sistema Android, visible con la app abierta o en segundo plano.
 
 **Consequences (testable):**
 - Cualquier cambio de estado originado por el MCP (FR-16), por la API o por el escaneo periódico dispara un evento SSE; la app actualiza la fila afectada sin esperar al polling.
+- Un cambio de estado originado por una tool del MCP (`wake_machine`, `shutdown_machine`; `force_scan` cuando cambie un estado) genera una notificación del sistema Android (bandeja), con el evento SSE etiquetado como origen `mcp` (FR-11).
+- Los cambios originados por otro dispositivo o por el escaneo se reflejan en la fila **sin** notificación del sistema (solo MCP notifica).
+- La notificación requiere permiso `POST_NOTIFICATIONS` de Android; si está denegado, el cambio se refleja en la lista igualmente y la app sugiere activarlo desde ajustes.
 - La app se suscribe al stream SSE con su token de dispositivo (auth del stream = mismo token).
 - El polling (FR-12) queda como fallback y refresco manual: con la suscripción activa, el estado se refleja en ≤2 s; sin ella (stream caído, ahorro de batería), el polling de 30 s mantiene la lista.
 - Si el stream se interrumpe, la app lo reconecta con backoff y el polling cubre el hueco.
 
 **Feature-specific NFRs:**
-- El stream SSE no debe impedir el modo ahorro de batería: se pausa y solo el polling queda activo (FR-12).
+- El stream SSE no debe impedir el modo ahorro de batería: se pausa y solo el polling queda activo (FR-12). Las notificaciones del sistema se generan al recibir el evento SSE con la app en primer plano o segundo plano.
 
 ## 5. Non-Goals (Explicit)
 

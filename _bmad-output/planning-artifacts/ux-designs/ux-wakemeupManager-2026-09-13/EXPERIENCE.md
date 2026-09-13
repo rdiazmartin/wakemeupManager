@@ -37,13 +37,16 @@ Microcopy. Voz técnica pero amable; los tecnicismos de red se explican en lengu
 
 ## Component Patterns
 
+## Component Patterns
+
 | Component | Use | Behavioral rules |
 |---|---|---|
 | Machine row | Lista | Tap en fila: nada (sin detalle en v1) — las acciones son los botones inline. `[ASSUMPTION: sin pantalla de detalle; decidido en sesión: todo en la lista]` |
 | Power button (inline) | Fila de máquina | Visible en descubiertas como CTA `Dar de alta`; en gestionadas: `Encender` (disponible si offline) y `Apagar` (disponible siempre que esté online). |
 | Power off dialog | Fila → Apagar | Siempre, sin excepción; confirmación explícita antes de disparar apagado. |
 | Scan button | Header | Gira (loader) durante el escaneo; al terminar, snackbar "Escaneo completado" o "Error de red". |
-| Snackbar | Resultados | Éxito breve; errores con motivo humano. |
+| Snackbar | Resultados | Éxito breve; errores con motivo humano. Solo acciones propias. |
+| Notificación de agente (sistema) | Evento SSE origen `mcp` → bandeja | Cambio de estado hecho por el agente IA: notificación del sistema (título = máquina, cuerpo = acción resultado; p. ej. "NAS — El agente apagó la máquina"). Permiso `POST_NOTIFICATIONS` pedido con explicación (onboarding o al primer evento); denegado → sin notificación, el cambio se refleja igual en la lista. (FR-18) |
 | Eventos en vivo (SSE) | Fila / lista | Los cambios de estado que llegan por el stream (acciones de otros dispositivos, del agente IA o del escaneo) actualizan la fila afectada sin spinner ni snackbar; la app solo muestra snackbar para las acciones que el propio usuario disparó. Si el stream cae, el polling de 30 s (FR-12) cubre el hueco sin avisar al usuario. `[ASSUMPTION: sin indicador visual de 'conexión en vivo' en v1 — el estado de la fila es la única señal]` |
 
 ## State Patterns
@@ -66,7 +69,7 @@ Microcopy. Voz técnica pero amable; los tecnicismos de red se explican en lengu
 - Pull-to-refresh en la lista (dispara re-fetch de inventario y estado).
 - El popup de apagado es modal de confirmación estándar (dialog) — no bottomsheet, no haptic-only.
 - El botón de escaneo del header fuerza un escaneo del BE (FR-3) de forma síncrona con loader.
-- Banned: swipe-to-delete sobre máquinas (el borrado no existe en la UI de v1; `DELETE` es uso avanzado vía API/CLI), carruseles, animaciones hero de apertura, badges numéricos, notificaciones push.
+- Banned: swipe-to-delete sobre máquinas (el borrado no existe en la UI de v1; `DELETE` es uso avanzado vía API/CLI), carruseles, animaciones hero de apertura, badges numéricos. Notificaciones del sistema: SOLO para cambios de estado originados por el agente IA (MCP), con permiso explícito y explicado; nunca para el resto de orígenes.
 
 ## Accessibility Floor
 
@@ -113,14 +116,15 @@ Fallo: password incorrecta → error inline "Credenciales incorrectas — intén
 
 Fallo: la máquina no apaga (sin sudo NOPASSWD) → snackbar "No se pudo apagar: revisa los permisos SSH de <máquina>" (el alta ya avisó de este requisito).
 
-### Flow 4 — El agente IA apaga la NAS desde la tailnet (Roberto, sin tocarla)
+### Flow 4 — El agente IA apaga la NAS desde la tailnet (Roberto, notificado)
 
-1. Roberto tiene la app abierta; la NAS muestra "Encendida".
+1. Roberto tiene la app abierta (o en segundo plano); la NAS muestra "Encendida".
 2. Un agente IA (MCP, FR-16) apaga la NAS vía el BE.
-3. El BE emite el evento de estado (SSE, FR-18); la fila de la NAS pasa a "Apagada" sin interacción de Roberto. [ASSUMPTION]
-4. **Climax:** el estado refleja la realidad aunque la acción vino del agente — la app y el agente comparten la misma fuente de verdad.
+3. El BE emite el evento de estado con origen `mcp` (SSE, FR-18); la fila de la NAS pasa a "Apagada" sin interacción de Roberto.
+4. La app muestra una **notificación del sistema**: "NAS — El agente apagó la máquina" (también con la app en segundo plano).
+5. **Climax:** Roberto sabe quién apagó la NAS aunque no esté mirando la app — la notificación conecta la acción del agente con su dispositivo.
 
-Fallo: stream caído → el polling de 30 s actualiza la fila en ≤30 s, sin aviso al usuario.
+Fallo: stream caído → la notificación y la actualización llegan con el polling (≤30 s); permiso de notificaciones denegado → solo cambia la fila, sin aviso.
 
 ## Inspiration & Anti-patterns
 
