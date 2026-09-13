@@ -1,0 +1,18 @@
+# Project overlay on the packaged opencode-http profile (replaces it wholesale).
+# This project keeps its BMAD skills in .agents/skills (opencode's own
+# discovery tree) rather than the packaged profile default of .claude/skills.
+# All other fields mirror the packaged profile (bmad_loop/data/profiles/opencode.toml).
+name = "opencode-http"
+binary = "opencode"
+adapter = "opencode-http"
+prompt_template = "Use the {skill} skill now: {args}"
+usage_parser = "none"
+skill_tree = ".agents/skills"
+first_run_note = "run `opencode auth login` once on this machine; headless servers reuse the stored credentials"
+env_fault_patterns = [
+  'error[.]error="AI_APICallError: [^"]{0,400}?(?i:usage limit reached|429|too many requests|rate[ _-]?limit|quota|overloaded)',
+  'error[.]error="AI_APICallError: [^"]{0,400}?(?i:cannot connect to api|socket connection was closed|connection ?(error|refused|reset|timed ?out)|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)',
+]
+
+[hooks]
+dialect = "none"
