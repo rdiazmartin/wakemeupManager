@@ -1,0 +1,33 @@
+# wakemeupManager BE — ejemplo de configuración.
+# Copiar a /etc/wakemeup/config.toml (o backend/config/config.toml en desarrollo)
+# y ajustar valores. Los valores aquí son de referencia; la carga efectiva de la
+# configuración se integra en la story 1.2 (descubrimiento).
+
+[scan]
+# Rango de IPs de la LAN física a escanear (descubrimiento; ver AD-3).
+range = "192.168.1.0/24"
+# Intervalo del escaneo periódico (FR-3): 10 minutos por defecto.
+interval_seconds = 600
+# TTL del estado online/offline y cadencia de comprobación (FR-2):
+# se comprueba cada ttl_seconds/2 y el estado caduca a los ttl_seconds.
+ttl_seconds = 60
+
+[api]
+# Interfaz a la que se vincula el BE (FR-9, AD-6): solo tailnet + loopback.
+# P. ej. "100.100.100.1,127.0.0.1".
+bind_hosts = ["127.0.0.1"]
+port = 8080
+# Prefijo de los endpoints REST (AD-1).
+prefix = "/api/v1"
+
+[shutdown]
+# Comando de apagado del BE vía SSH (AD-4). Requiere sudoers NOPASSWD en la
+# máquina remota restringido a este comando.
+command = "sudo -n systemctl poweroff"
+
+[auth]
+# Política de backoff de autenticación (FR-10): 5 fallos en 5 minutos
+# bloquean la fuente durante 15 minutos (HTTP 429).
+max_failures = 5
+window_seconds = 300
+block_seconds = 900

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wakemeup-backend"
+version = "0.1.0"
+description = "Backend de wakemeupManager: gestión de encendido/apagado de máquinas de la red"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.141",
+    "uvicorn>=0.34",
+    "pydantic-settings>=2.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wakemeup"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.28",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
