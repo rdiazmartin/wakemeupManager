@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Machine list screen -->
+    <string name="app_name">wakemeupManager</string>
+    <string name="machines_title">wakemeupManager</string>
+    <string name="machines_empty">No machines found</string>
+    <string name="machines_empty_scan_first">No machines in the inventory yet.</string>
+    <string name="machines_scan_now">Scan now</string>
+    <string name="machines_scanning">Scanning…</string>
+    <string name="machines_offline_badge">Offline</string>
+    <string name="machines_pull_to_refresh_text">Updating…</string>
+
+    <!-- Machine states -->
+    <string name="machine_status_online">On</string>
+    <string name="machine_status_offline">Off</string>
+    <string name="machine_status_no_fiable">Unreliable</string>
+
+    <!-- Row actions -->
+    <string name="machine_action_enroll">Enroll</string>
+    <string name="machine_action_wake">Wake</string>
+    <string name="machine_action_shutdown">Shut down</string>
+    <string name="machine_action_noop_info">Available in a future version</string>
+
+    <!-- Row content -->
+    <string name="machine_ip_label">IP</string>
+    <string name="machine_mac_label">MAC</string>
+</resources>

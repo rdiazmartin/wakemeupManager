@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- Robolectric necesita resolver androidx.activity.ComponentActivity para
+             los tests de Compose con createComposeRule().
+             Referencia: https://github.com/robolectric/robolectric/pull/4736
+             (solo se fusiona en el manifest de debug, no en release). -->
+        <activity android:name="androidx.activity.ComponentActivity" />
+    </application>
+
+</manifest>
