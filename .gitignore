@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.virtualenv/
+*.egg-info/
+.env
+.gradle/
+build/
+dist/
+local.properties
+*.iml
+.idea/
+.cache/
+*.log
