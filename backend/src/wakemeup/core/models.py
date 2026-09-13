@@ -24,3 +24,5 @@ class Machine:
     ip: str
     mac: str | None = None
     hostname: str | None = None
+    state: str = "offline"
+    status_checked_at: str | None = None

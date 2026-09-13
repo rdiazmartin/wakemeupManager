@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-13-2026 16:27
-last_updated: 09-13-2026 18:05
+last_updated: 09-13-2026 19:00
 project: wakemeupManager
 project_key: NOKEY
 tracking_system: file-system
@@ -37,8 +37,8 @@ story_location: _bmad-output/implementation-artifacts
 development_status:
   epic-1: in-progress
   1-1-esqueleto-del-be-hexagonal-config-y-despliegue-base: review
-  1-2-descubrimiento-de-máquinas-escaneo-del-rango: review
-  1-3-estado-online-offline-con-ttl: backlog
+  1-2-descubrimiento-de-máquinas-escaneo-del-rango: done
+  1-3-estado-online-offline-con-ttl: done
   1-4-api-de-inventario-y-tokens-de-dispositivo: backlog
   1-5-listado-de-máquinas-en-la-app-tema-oscuro-poll-y-escanear-ah: backlog
   1-6-primer-arranque-y-configuración-de-conexión: backlog
