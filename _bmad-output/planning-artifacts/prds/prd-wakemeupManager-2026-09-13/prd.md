@@ -3,7 +3,7 @@ title: wakemeupManager
 status: final
 created: 2026-09-13
 updated: 2026-09-13
-revision: r3 — update MCP (sección 4.6, FR-16..18, FR-10b, canal mcp en FR-11, MVP 6.1); requerimientos del usuario añadidos en sesión de trabajo.
+revision: r4 — FR-18 ampliado: cambios de estado del MCP se notifican con notificación del sistema Android (solo origen mcp; POST_NOTIFICATIONS con fallback). r3: update MCP (sección 4.6, FR-16..18, FR-10b, canal mcp en FR-11).
 ---
 
 # PRD: wakemeupManager
