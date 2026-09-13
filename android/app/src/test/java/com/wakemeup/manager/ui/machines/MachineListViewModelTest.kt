@@ -98,12 +98,19 @@ class MachineListViewModelTest {
     }
 
     /** API OK: GET /machines devuelve 2 máquinas; POST /scan devuelve 202. */
-    private fun TestScope.okApi(scanRunning: Boolean = false): Pair<WakemeupApi, MutableList<Pair<String, String>>> {
-        val log = mutableListOf<Pair<String, String>>()
+    private fun TestScope.okApi(scanRunning: Boolean = false): Pair<WakemeupApi, MutableList<Triple<String, String, String>>> {
+        // Triple: (method, url, Authorization) para poder afirmar el header.
+        val log = mutableListOf<Triple<String, String, String>>()
         val api = WakemeupApi(
             settings = InMemorySettingsRepository(apiUrl = "http://test/api/v1", deviceToken = "t"),
             client = client { request ->
-                log.add(request.method.value to request.url.toString())
+                log.add(
+                    Triple(
+                        request.method.value,
+                        request.url.toString(),
+                        request.headers["Authorization"] ?: "",
+                    )
+                )
                 when {
                     request.url.toString().endsWith("/machines") ->
                         respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
@@ -139,7 +146,7 @@ class MachineListViewModelTest {
 
     @Test
     fun `primer fetch carga la lista y limpia loading y empty`() = runTest {
-        val (api, _) = okApi()
+        val (api, log) = okApi()
         val vm = newViewModel(api)
 
         assertThat(vm.uiState.value.isLoading).isTrue()
@@ -153,6 +160,23 @@ class MachineListViewModelTest {
         assertThat(state.machines[0].name).isEqualTo("Desktop")
         assertThat(state.isEmpty).isFalse()
         assertThat(state.isOffline).isFalse()
+        // El token viaja como Bearer en cada petición (contrato 1.4, AD-6).
+        assertThat(log[0].third).isEqualTo("Bearer t")
+    }
+
+    @Test
+    fun `escanar ahora envía el token en el POST scan`() = runTest {
+        val (api, log) = okApi()
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+
+        vm.scanNow()
+        runCurrent()
+
+        val scan = log.single { it.first == "POST" }
+        assertThat(scan.second).endsWith("/scan")
+        assertThat(scan.third).isEqualTo("Bearer t")
     }
 
     @Test
@@ -246,6 +270,38 @@ class MachineListViewModelTest {
     }
 
     @Test
+    fun `escanar ahora con escaneo fallido no rompe la lista y refresca igualmente`() = runTest {
+        // El POST /scan puede fallar (red, BE caído): nunca un crash; el
+        // spinner se limpia y la lista se intenta refrescar igualmente
+        // (el refresh posterior con 200 limpia el badge y conserva las máquinas).
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else ->
+                        respond(
+                            """{"error":{"code":"internal_error","message":"boom"}}""",
+                            HttpStatusCode.InternalServerError,
+                            jsonHeaders(),
+                        )
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+
+        vm.scanNow()
+        runCurrent()
+
+        assertThat(vm.uiState.value.isScanning).isFalse()
+        assertThat(vm.uiState.value.isOffline).isFalse() // refresh exitoso tras el fallo
+        assertThat(vm.uiState.value.machines).hasSize(2)
+    }
+
+    @Test
     fun `polling refresca silenciosamente cada intervalo`() = runTest {
         val (api, log) = okApi()
         val vm = newViewModel(api, pollMs = 30_000L)
@@ -261,6 +317,105 @@ class MachineListViewModelTest {
         runCurrent()
         assertThat(log.filter { it.first == "GET" }).hasSize(3)
         assertThat(vm.uiState.value.isOffline).isFalse()
+    }
+
+    @Test
+    fun `doble escanar ahora solo dispara un POST en vuelo`() = runTest {
+        // Handler con /scan lento; el segundo scanNow debe ignorarse mientras
+        // el primero está en vuelo (guard de isScanning).
+        val postLog = mutableListOf<Long>()
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else -> {
+                        postLog.add(System.nanoTime())
+                        delay(5_000)
+                        respond(scanJson(), HttpStatusCode.Accepted, jsonHeaders())
+                    }
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+
+        vm.scanNow()
+        runCurrent()
+        assertThat(vm.uiState.value.isScanning).isTrue()
+        vm.scanNow() // segundo tap mientras el escaneo vuela
+        advanceTimeBy(5_000L)
+        runCurrent()
+        runCurrent()
+
+        assertThat(postLog).hasSize(1)
+        assertThat(vm.uiState.value.isScanning).isFalse()
+    }
+
+    @Test
+    fun `fetch fallido sin cache muestra badge sin conexion (no empty state)`() = runTest {
+        // UX-DR4: un fallo de red en el primer fetch NO es "no hay máquinas";
+        // el badge "Sin conexión" se muestra sin contenido cacheado.
+        val failing = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { respond("boom", HttpStatusCode.ServiceUnavailable) },
+        )
+        val vm = newViewModel(failing) // caché vacía
+        vm.start()
+        runCurrent()
+
+        val state = vm.uiState.value
+        assertThat(state.isLoading).isFalse()
+        assertThat(state.isOffline).isTrue()
+        assertThat(state.isEmpty).isFalse() // no empty state engañoso
+        assertThat(state.machines).isEmpty()
+    }
+
+    @Test
+    fun `body malformado con 200 lanza ApiException y la lista queda cacheada`() = runTest {
+        val cache = MachinesCache()
+        cache.save(sampleMachines)
+        val weird = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { respond("not-json", HttpStatusCode.OK, jsonHeaders()) },
+        )
+        val vm = newViewModel(weird, cache = cache)
+        vm.start()
+        runCurrent()
+
+        // El error de deserialización se captura como fallo de red genérico.
+        assertThat(vm.uiState.value.isOffline).isTrue()
+        assertThat(vm.uiState.value.machines).hasSize(2)
+    }
+
+    @Test
+    fun `fromWire mapea estados y desconocido degrada a no fiable`() = runTest {
+        // Trigo 1.5: un status no previsto del BE (versión futura) → NO_FIABLE
+        // (badge ámbar, sin acciones destructivas), nunca OFFLINE (que habilitaría
+        // acciones de energía sobre un estado mal entendido).
+        assertThat(MachineStatus.fromWire("online")).isEqualTo(MachineStatus.ONLINE)
+        assertThat(MachineStatus.fromWire("offline")).isEqualTo(MachineStatus.OFFLINE)
+        assertThat(MachineStatus.fromWire("no_fiable")).isEqualTo(MachineStatus.NO_FIABLE)
+        assertThat(MachineStatus.fromWire("suspenden")).isEqualTo(MachineStatus.NO_FIABLE)
+    }
+
+    @Test
+    fun `deserializacion del DTO del contrato`() = runTest {
+        // El JSON es el del contrato 1.4 verbatim (managed presente, status libre).
+        val raw = """{"machines":[{"id":1,"name":"Desktop","ip":"192.168.1.10","mac":"AA:BB:CC:DD:EE:01","hostname":"desktop","status":"online","managed":false}]}"""
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { respond(raw, HttpStatusCode.OK, jsonHeaders()) },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+        val m = vm.uiState.value.machines.single()
+        assertThat(m.name).isEqualTo("Desktop")
+        assertThat(m.status).isEqualTo(MachineStatus.ONLINE)
+        assertThat(m.managed).isFalse()
     }
 
     @Test
@@ -317,3 +472,4 @@ class MachineListViewModelTest {
             assertThat(vm.uiState.value.machines).hasSize(2)
         }
 }
+

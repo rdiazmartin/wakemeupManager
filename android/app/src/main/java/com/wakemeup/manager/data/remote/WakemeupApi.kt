@@ -35,9 +35,13 @@ class WakemeupApi(
         val response: HttpResponse = client.get("${settings.apiUrl}/machines") {
             bearerAuth(settings.deviceToken)
         }
-        return when {
-            !response.status.isSuccessCode() -> throw response.toApiException("/machines")
-            else -> response.body<MachinesEnvelopeDto>().machines.map { it.toDomain() }
+        if (!response.status.isSuccessCode()) throw response.toApiException("/machines")
+        // Body malformado (200 sin JSON del contrato) → ApiException uniforme,
+        // no una SerializationException cruda (envelope AD-1).
+        return try {
+            response.body<MachinesEnvelopeDto>().machines.map { it.toDomain() }
+        } catch (_: Exception) {
+            throw ApiException("bad_response", "respuesta inválida de /machines")
         }
     }
 
@@ -45,9 +49,11 @@ class WakemeupApi(
         val response: HttpResponse = client.post("${settings.apiUrl}/scan") {
             bearerAuth(settings.deviceToken)
         }
-        return when {
-            response.status != HttpStatusCode.Accepted -> throw response.toApiException("/scan")
-            else -> response.body<ScanEnvelopeDto>().scan.toDomain()
+        if (response.status != HttpStatusCode.Accepted) throw response.toApiException("/scan")
+        return try {
+            response.body<ScanEnvelopeDto>().scan.toDomain()
+        } catch (_: Exception) {
+            throw ApiException("bad_response", "respuesta inválida de /scan")
         }
     }
 

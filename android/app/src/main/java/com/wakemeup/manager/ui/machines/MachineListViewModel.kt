@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
+import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -27,10 +28,12 @@ data class MachineListUiState(
     val isLoading: Boolean = true,
     val machines: List<Machine> = emptyList(),
     val isEmpty: Boolean = false,
-    /** Último fetch falló con caché disponible (badge "Sin conexión"). */
+    /** Último fetch o scan falló (badge "Sin conexión"). */
     val isOffline: Boolean = false,
     /** POST /scan en vuelo (spinner / texto Escaneando… con Reduce Motion). */
     val isScanning: Boolean = false,
+    /** Pull-to-refresh atado a la operación real (no parpadea). */
+    val isRefreshing: Boolean = false,
 )
 
 class MachineListViewModel(
@@ -38,7 +41,8 @@ class MachineListViewModel(
     private val cache: MachinesCache,
     /** Período de polling en ms (10–300 s; default 30 s). */
     private val pollingIntervalMs: Long = DEFAULT_POLL_INTERVAL_MS,
-    private val timeProvider: () -> Long = System::currentTimeMillis,
+    /** Reloj monotónico por defecto (immune a saltos de reloj de pared). */
+    private val timeProvider: () -> Long = { SystemClock.elapsedRealtime() },
     /** Ámbito inyectable para los tests de Robolectric; en producción usa [ViewModel.viewModelScope]. */
     private val externalScope: CoroutineScope? = null,
 ) : ViewModel() {
@@ -49,7 +53,15 @@ class MachineListViewModel(
     val uiState: StateFlow<MachineListUiState> = _uiState.asStateFlow()
 
     private var pollJob: Job? = null
+    /** Serializa los refrescos: cada nueva llamada cancela el anterior (último gana). */
+    private var refreshJob: Job? = null
     private var startedAt: Long = 0L
+
+    init {
+        require(pollingIntervalMs in 10_000..300_000) {
+            "pollingIntervalMs debe estar en 10 s..300 s (FR-12), dado $pollingIntervalMs"
+        }
+    }
 
     fun start() {
         if (pollJob != null) return
@@ -58,43 +70,59 @@ class MachineListViewModel(
             refresh()
             while (true) {
                 val elapsed = timeProvider() - startedAt
-                delay(pollingIntervalMs - (elapsed % pollingIntervalMs))
+                // Módulo seguro: si el reloj salta hacia atrás (NTP/mano),
+                // el tick no se vuelve negativo; con elapsedRealtime no ocurre.
+                val tick = (elapsed % pollingIntervalMs + pollingIntervalMs) % pollingIntervalMs
+                delay(pollingIntervalMs - tick)
                 refresh(silent = true)
             }
         }
     }
 
-    fun refresh(silent: Boolean = false) = withScopeOrNothing {
-        runCatching { api.listMachines() }
-            .onSuccess { machines ->
-                cache.save(machines)
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        machines = machines,
-                        isEmpty = machines.isEmpty(),
-                        isOffline = false,
-                    )
+    fun refresh(silent: Boolean = false) {
+        if (!scope.isActive) return
+        // El último refresco gana: cancela el anterior para que un poll lento
+        // no pise una respuesta más nueva (pull-to-refresh/scan/otro tick).
+        refreshJob?.cancel()
+        refreshJob = scope.launch {
+            if (!silent) _uiState.update { it.copy(isRefreshing = true) }
+            runCatching { api.listMachines() }
+                .onSuccess { machines ->
+                    cache.save(machines)
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            machines = machines.distinctBy { m -> m.id },
+                            isEmpty = machines.isEmpty(),
+                            isOffline = false,
+                            isRefreshing = false,
+                        )
+                    }
                 }
-            }
-            .onFailure { error ->
-                val cached = cache.get()
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        // Caché en memoria: muestra la última lista OK si existe (UX-DR4).
-                        machines = if (cached.isNotEmpty()) cached else it.machines,
-                        isEmpty = cached.isEmpty() && it.machines.isEmpty(),
-                        isOffline = cached.isNotEmpty() || it.machines.isNotEmpty(),
-                    )
+                .onFailure { _ ->
+                    val cached = cache.get()
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            // Caché en memoria: muestra la última lista OK si existe (UX-DR4).
+                            machines = if (cached.isNotEmpty()) cached else it.machines,
+                            // El empty state ("No se encontraron máquinas") solo se muestra
+                            // con 200 [] real; un fallo de red nunca lo finge (badge en su lugar).
+                            isEmpty = false,
+                            isOffline = true,
+                            isRefreshing = false,
+                        )
+                    }
                 }
-            }
+        }
     }
 
     /** "Escanear ahora": POST /scan, spinner mientras escanea y refresco tras el 202 (AD-3). */
     fun scanNow() = withScopeOrNothing {
+        if (_uiState.value.isScanning) return@withScopeOrNothing  // nunca dos POST en paralelo
         _uiState.update { it.copy(isScanning = true) }
         runCatching { api.triggerScan() }
+            .onFailure { _uiState.update { it.copy(isOffline = true) } }
         _uiState.update { it.copy(isScanning = false) }
         refresh()
     }
@@ -115,6 +143,8 @@ class MachineListViewModel(
     private inline fun withScopeOrNothing(crossinline block: suspend () -> Unit) {
         if (scope.isActive) scope.launch { block() }
     }
+    // Nota: `refresh` y `scanNow` no usan withScopeOrNothing: lanzan jobs
+    // nombrados con cancelación explícita (serialización de refreshes, 1.5).
 
     companion object {
         const val DEFAULT_POLL_INTERVAL_MS = 30_000L

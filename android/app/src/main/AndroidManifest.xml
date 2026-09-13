@@ -8,7 +8,11 @@
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme">
+        <!-- usesCleartextTraffic="true": el BE se sirve por HTTP dentro de la
+             tailnet (AD-6); TLS se reabre si la API se expone por otra vía
+             (spine §Deferred — "TLS/HTTPS en la API"). -->
 
         <activity
             android:name=".MainActivity"

@@ -1,5 +1,7 @@
 package com.wakemeup.manager.domain
 
+import java.util.Locale
+
 /** Estado de una máquina según el contrato del BE (AD-10). */
 enum class MachineStatus {
     ONLINE,
@@ -7,11 +9,11 @@ enum class MachineStatus {
     NO_FIABLE;
 
     companion object {
-        fun fromWire(value: String): MachineStatus = when (value.lowercase()) {
+        fun fromWire(value: String): MachineStatus = when (value.lowercase(Locale.ROOT)) {
             "online" -> ONLINE
             "offline" -> OFFLINE
             "no_fiable" -> NO_FIABLE
-            else -> OFFLINE
+            else -> NO_FIABLE
         }
     }
 }

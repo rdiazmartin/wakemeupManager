@@ -23,6 +23,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.wakemeup.manager.R
@@ -83,11 +85,21 @@ fun MachineRow(
                         else if (offline) InkSecondary
                         else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    val ipLabel = stringResource(R.string.machine_ip_label)
+                    val macLabel = stringResource(R.string.machine_mac_label)
                     Text(
                         text = "${machine.ip}${machine.mac?.let { " · $it" } ?: ""}",
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
                         color = if (offline) InkSecondary.copy(alpha = 0.7f) else InkSecondary,
+                        modifier = Modifier.semantics {
+                            // TalkBack anuncia "IP 192.168.1.10, MAC AA:BB:…" en lugar
+                            // del blob con punto medio (accessibility floor).
+                            contentDescription = buildString {
+                                append(ipLabel).append(' ').append(machine.ip)
+                                machine.mac?.let { append(", ").append(macLabel).append(' ').append(it) }
+                            }
+                        },
                     )
                 }
             }
@@ -98,20 +110,22 @@ fun MachineRow(
                 when {
                     // AD-10/UX-DR5: no_fiable → badge ámbar, sin acciones destructivas.
                     noFiable -> Unit
-                    // Gestión de estado primero: offline → Encender; online → según gestión.
+                    // UX-DR5: descubierta (managed=false) → SOLO "Dar de alta",
+                    // independientemente del estado (encender/apagar son de gestionadas).
+                    !machine.managed -> ActionButton(
+                        label = R.string.machine_action_enroll,
+                        icon = Icons.Outlined.Add,
+                        tonal = true,
+                        onTap = { onActionTap(machine) },
+                    )
+                    // Gestión de estado: offline → Encender; gestionada/online → Apagar.
                     offline -> ActionButton(
                         label = R.string.machine_action_wake,
                         icon = Icons.Outlined.PowerSettingsNew,
                         tonal = true,
                         onTap = { onActionTap(machine) },
                     )
-                    online && !machine.managed -> ActionButton(
-                        label = R.string.machine_action_enroll,
-                        icon = Icons.Outlined.Add,
-                        tonal = true,
-                        onTap = { onActionTap(machine) },
-                    )
-                    online -> ActionButton(
+                    else -> ActionButton(
                         label = R.string.machine_action_shutdown,
                         icon = Icons.Outlined.PowerSettingsNew,
                         tonal = false,

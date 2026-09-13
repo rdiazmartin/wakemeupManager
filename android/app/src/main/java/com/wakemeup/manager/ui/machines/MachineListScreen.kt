@@ -1,5 +1,10 @@
 package com.wakemeup.manager.ui.machines
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -34,13 +39,14 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -76,9 +82,34 @@ fun MachineListScreen(
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
+    // Ahorro de batería reactivo: también se re-evalúa cuando el sistema lo
+    // activa/desactiva en caliente (ACTION_POWER_SAVE_MODE_CHANGED).
+    val batterySaver by produceState(
+        initialValue = MachineListViewModel.isBatterySaverActive(context) ||
+            MachineListViewModel.isBatteryLow(context),
+        context,
+    ) {
+        value = MachineListViewModel.isBatterySaverActive(context) ||
+            MachineListViewModel.isBatteryLow(context)
+        val filter = IntentFilter().apply {
+            addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            addAction(Intent.ACTION_BATTERY_LOW)
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                value = MachineListViewModel.isBatterySaverActive(context) ||
+                    MachineListViewModel.isBatteryLow(context)
+            }
+        }
+        context.registerReceiver(receiver, filter)
+        awaitDispose { context.unregisterReceiver(receiver) }
+    }
+    LaunchedEffect(batterySaver) {
+        viewModel.setBatterySaver(batterySaver)
+    }
+
     LaunchedEffect(Unit) {
         viewModel.start()
-        viewModel.setBatterySaver(MachineListViewModel.isBatterySaverActive(context))
     }
 
     Scaffold(
@@ -97,6 +128,7 @@ fun MachineListScreen(
                 actions = {
                     ScanNowButton(
                         scanning = uiState.isScanning,
+                        reduceMotion = isReduceMotionEnabled(),
                         onClick = viewModel::scanNow,
                     )
                 },
@@ -115,9 +147,13 @@ fun MachineListScreen(
             OfflineBanner(visible = uiState.isOffline)
             when {
                 uiState.isLoading -> SkeletonList()
-                uiState.isEmpty -> EmptyState(onScan = viewModel::scanNow)
+                uiState.isEmpty -> EmptyState(
+                    onScan = viewModel::scanNow,
+                    scanning = uiState.isScanning,
+                )
                 else -> MachineList(
                     machines = uiState.machines,
+                    isRefreshing = uiState.isRefreshing,
                     onRefresh = { viewModel.refresh() },
                     onActionTap = {
                         scope.launch {
@@ -133,8 +169,11 @@ fun MachineListScreen(
 }
 
 @Composable
-private fun ScanNowButton(scanning: Boolean, onClick: () -> Unit) {
-    val reduceMotion = isReduceMotionEnabled()
+internal fun ScanNowButton(
+    scanning: Boolean,
+    reduceMotion: Boolean,
+    onClick: () -> Unit,
+) {
     if (scanning) {
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -143,11 +182,14 @@ private fun ScanNowButton(scanning: Boolean, onClick: () -> Unit) {
         ) {
             if (!reduceMotion) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier
+                        .size(18.dp)
+                        .testTag("scan_spinner"),
                     strokeWidth = 2.dp,
                     color = AccentMint,
                 )
             }
+            // Reduce Motion: el spinner se sustituye por texto ("Escaneando…").
             Text(
                 text = stringResource(R.string.machines_scanning),
                 style = MaterialTheme.typography.labelMedium,
@@ -209,19 +251,13 @@ private fun OfflineBanner(visible: Boolean) {
 @Composable
 private fun MachineList(
     machines: List<Machine>,
+    isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onActionTap: (Machine) -> Unit,
 ) {
-    var refreshing by remember { mutableStateOf(false) }
-    LaunchedEffect(refreshing) {
-        if (refreshing) {
-            onRefresh()
-            refreshing = false
-        }
-    }
     PullToRefreshBox(
-        isRefreshing = refreshing,
-        onRefresh = { refreshing = true },
+        isRefreshing = isRefreshing,
+        onRefresh = onRefresh,
         modifier = Modifier.fillMaxSize(),
     ) {
         LazyColumn(
@@ -260,7 +296,7 @@ private fun SkeletonList() {
 
 /** Lista vacía con mensaje y acción de escaneo (UX-DR4). */
 @Composable
-private fun EmptyState(onScan: () -> Unit) {
+private fun EmptyState(onScan: () -> Unit, scanning: Boolean) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -282,7 +318,7 @@ private fun EmptyState(onScan: () -> Unit) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = InkSecondary,
             )
-            TextButton(onClick = onScan) {
+            TextButton(onClick = onScan, enabled = !scanning) {
                 Icon(Icons.Outlined.Search, contentDescription = null)
                 Text(stringResource(R.string.machines_scan_now))
             }

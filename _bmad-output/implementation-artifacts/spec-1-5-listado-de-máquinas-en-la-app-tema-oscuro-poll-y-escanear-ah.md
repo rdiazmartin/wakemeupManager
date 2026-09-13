@@ -2,7 +2,7 @@
 title: '1-5-listado-de-máquinas-en-la-app-tema-oscuro-poll-y-escanear-ah'
 type: 'feature'
 created: '2026-09-13'
-status: 'in-progress'
+status: 'done'
 route: 'dispatch'
 review_loop_iteration: 0
 context: []
@@ -92,8 +92,6 @@ baseline_commit: '89a6e10'
 
 **Implementation Notes**
 
-_(vacío en planificación; lo rellena la implementación)_
-
 - **compileSdk 37**: el stack del spine fija Compose BOM 2026.09.00 (M3 1.4.0 / Compose UI 1.12.1), cuyos AAR exigen compilar contra API 37 (`checkDebugAarMetadata` falla con 36). Instalada `platforms;android-37.0` + `build-tools;37.0.0` en el SDK del host; `targetSdk` sigue en 36 conforme al stack.
 - **Built-in Kotlin de AGP 9.0**: el plugin `kotlin-android` no se aplica (incompatible con el DSL nuevo); solo se aplican `org.jetbrains.kotlin.plugin.compose` y `plugin.serialization`. KGP 2.4.20 se fija vía `buildscript`. La propiedad global `android.defaults.buildfeatures.buildconfig` ya no existe en AGP 9 → se usa `buildFeatures { buildConfig = true }`.
 - **Robolectric + Compose**: `createComposeRule()` lanza `androidx.activity.ComponentActivity`; debe declararse en el manifest de la variante de test (`app/src/debug/AndroidManifest.xml`, referencia robolectric PR #4736).
@@ -101,10 +99,35 @@ _(vacío en planificación; lo rellena la implementación)_
 - **API Ktor 3.5.2**: `HttpStatusCode.isSuccess` (Ktor 2.x) ya no existe → helper local; `Context.registerReceiver(intent, flag)` roto con `Intent` → `IntentFilter`; un content lambda `@Composable` reutilizado en dos botones rompe el compilador → duplicado.
 - **Acciones de fila**: los botones se renderizan por estado y su tap muestra snackbar informativo "Disponible en la próxima versión" (strings ES/EN); nunca navegan ni llaman al BE.
 - **Polling**: primer tick inmediato; siguientes en múltiplos de 30 s respecto a `timeProvider()` (inyectable). Ahorro de batería cancela el job de polling y lo relanza al restaurar.
-- **Escanear ahora**: spinner mientras el POST /scan está en vuelo y refresco tras el 202 (también con `running:true`); con Reduce Motion (animator scale 0) el spinner se sustituye por "Escaneando…".
-- **Verificación**: `:app:compileDebugKotlin`, `:app:testDebugUnitTest` (14 tests Robolectric verdes) y `:app:assembleDebug` (APK generado) pasan. Commit `73e9021` + push a `main`.
+- **Escanear ahora**: spinner mientras el POST /scan está en vuelo y refresco tras el 202 (también con `running:true`); con Reduce Motion (animator scale 0) el spinner se sustituye por "Escaneando…". `ScanNowButton` es `internal` (recibe `reduceMotion` como parámetro) para poder testear las dos ramas.
+- **Corrección post-commit (revisión de la verificación)**: la fila descubierta (managed=false) mostraba "Encender" en lugar de "Dar de alta" cuando estaba offline — UX-DR5 dice "descubierta → solo Alta"; corregido el `when` (managed se evalúa antes que offline) + tests "fila descubierta offline muestra solo dar de alta" y "fila gestionada offline muestra estado off y accion encender".
+- **Correcciones del triaje de revisión (todos con test o verificación)**: sprint-status sin clave duplicada; cleartext HTTP permitido (AD-6/Deferred TLS); `scanNow()` marca offline con fallo; batería low/power-save reactiva vía BroadcastReceiver; empty state nunca con fallo de red; refreshes serializados (job cancelable) con `isRefreshing` real; reloj elapsedRealtime + módulo seguro; `fromWire` desconocido → NO_FIABLE; TalkBack etiqueta IP/MAC; `.gitignore` del árbol android; guard de doble scan; `distinctBy` contra ids duplicados; `Locale.ROOT`; `ApiException` en body malformado; `require(10_000..300_000)`; security-crypto/DataStore declaradas.
+- **Gap de cobertura documentado**: no hay test de pantalla completa (`MachineListScreen` con `viewModel()` real) — requeriría fijar BuildConfig/activity de test; los call-sites son únicos y verificados por compilación; se cubrirá en 1.6 con la pantalla de ajustes.
+- **Verificación**: `:app:compileDebugKotlin`, `:app:testDebugUnitTest` (24 tests Robolectric verdes: 15 ViewModel + 9 fila/scan) y `:app:assembleDebug` (APK generado) pasan en local.
 - **Pendiente (no de esta story)**: lógica de acciones (Epic 2), ajustes/Keystore/token (1.6) y primer arranque (1.6). En 1.6 revisar si `ComponentActivity` sigue siendo necesario.
 
 ## Spec Change Log
 
 ## Review Triage Log
+
+- blind-hunter + edge-case + verification `sprint-status.yaml clave 1-5 duplicada (review+backlog)` — **high** — verificado con `yaml.safe_load`/`sprint_plan.py validate`: el par colapsa a backlog y el YAML es inválido. **patch**: eliminada la línea `backlog` residual; queda solo `review`; YAML validado.
+- blind-hunter `cleartext HTTP bloqueado en API 28+` — **high** — verificado: URL BuildConfig en http y sin `usesCleartextTraffic`; el BE se sirve por HTTP dentro de la tailnet (AD-6, TLS diferido en spine §Deferred). **patch**: `android:usesCleartextTraffic="true"` + comentario.
+- blind-hunter `scanNow() traga fallos` — **medium** — **patch**: `onFailure` marca `isOffline`; test `escanar ahora con escaneo fallido no rompe la lista y refresca igualmente`.
+- blind-hunter + edge-case + verification `batería muestreada una sola vez / isBatteryLow dead code` — **medium** — **patch**: `produceState` + `BroadcastReceiver` (`ACTION_POWER_SAVE_MODE_CHANGED` + `ACTION_BATTERY_LOW`) que re-evalúa `isBatterySaverActive || isBatteryLow` en caliente.
+- blind-hunter + edge-case `primer fetch sin caché → empty state engañoso` — **medium** — **patch**: `isEmpty=false` siempre que falle el fetch (el empty state solo con 200 [] real); test `fetch fallido sin cache muestra badge sin conexion (no empty state)`.
+- blind-hunter + edge-case `refresh sin serializar (race poll/PullToRefresh/scan) + silent dead` — **medium** — **patch**: `refreshJob` con cancelación (último gana); `silent` ahora controla `isRefreshing` (pull-to-refresh atado a la operación real, sin parpadeo).
+- blind-hunter + edge-case `polling con reloj de pared` — **medium** — **patch**: `timeProvider` default → `SystemClock.elapsedRealtime()` + módulo seguro (`(elapsed % interval + interval) % interval`) ante saltos NTP/mano.
+- blind-hunter `status wire desconocido → OFFLINE (habilitaría acciones de energía)` — **high** — **patch**: `fromWire` else → `NO_FIABLE` (badge ámbar, sin acciones destructivas); test `fromWire mapea estados y desconocido degrada a no fiable`.
+- blind-hunter `TalkBack anuncia IP/MAC como un blob (sin etiqueta)` — **low** — **patch**: `semantics contentDescription` con "IP … MAC …" usando los strings existentes.
+- blind-hunter `machines_pull_to_refresh_text sin uso` — **low** — sin patch (string reservado para el indicador del sistema cuando se consume el componente de M3; no se elimina por ser parte de la superfície de strings ES/EN).
+- blind-hunter `faltaba .gitignore del árbol android/` — **medium** — **patch**: creado `android/.gitignore` (`build/`, `.gradle/`, `local.properties`, `.kotlin/`, apks…); verificado que no se han commiteado artefactos.
+- blind-hunter `reduce-motion cacheado en remember + segunda acción de scan en empty state` — **low** — **patch parcial**: `EmptyState` deshabilita el botón mientras `isScanning`; la heurística `remember(context)` se conserva (se re-evalúa al recomponerse la pantalla; limitación documentada en Implementation Notes).
+- blind-hunter `202 hardcodeado para /scan + body malformado sin envelope` — **medium** — **patch**: el 202 es el único 2xx del contrato (AD-3 verbatim) → se mantiene; body malformado ahora se captura como `ApiException("bad_response")` uniforme; test `body malformado con 200 lanza ApiException y la lista queda cacheada`.
+- edge-case `pollingIntervalMs fuera de 10-300 s` — **low** — **patch**: `require(pollingIntervalMs in 10_000..300_000)` en el init del VM (FR-12).
+- edge-case `doble POST /scan (segundo tap en vuelo)` — **medium** — **patch**: guard `if (isScanning) return` en `scanNow()`; test `doble escanar ahora solo dispara un POST en vuelo`.
+- edge-case `ids duplicados rompen LazyColumn (DuplicateKey)` — **medium** — **patch**: `distinctBy { it.id }` al guardar la lista en el VM.
+- edge-case `lowercase() locale-dependiente (turco)` — **low** — **patch**: `Locale.ROOT` en `fromWire`.
+- edge-case + verification `security-crypto/DataStore afirmadas pero no declaradas` — **medium** — **patch**: declaradas en `app/build.gradle.kts` (1.1.0 / 1.2.1).
+- verification `Authorization nunca asertada (dropping del header pasaría con 17 tests verdes)` — **high** — verificado: MockEngine no inspecciona headers; **patch**: log del header en el MockEngine (Triple) + aserto `Bearer t` en `primer fetch` y en `escanar ahora envía el token en el POST scan`.
+- verification `binding de pantalla sin test (ScanNowButton con onClick={})` — **medium** — **defer-nota**: test de pantalla completa con `viewModel()` real requeriría fijar BuildConfig/activity; documentado como gap de cobertura en Implementation Notes; el cableado es un único call-site verificado por compilación.
+- verification `deserialización DTO sin test` — **medium** — **patch**: test `deserializacion del DTO del contrato` (JSON verbatim del 1.4).

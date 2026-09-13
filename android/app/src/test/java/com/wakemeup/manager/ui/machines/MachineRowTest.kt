@@ -2,6 +2,7 @@ package com.wakemeup.manager.ui.machines
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.google.common.truth.Truth.assertThat
@@ -49,16 +50,29 @@ class MachineRowTest {
         compose.onNodeWithText("192.168.1.10 · AA:BB:CC:DD:EE:FF").assertIsDisplayed()
         compose.onNodeWithText("Encendida").assertIsDisplayed()
         compose.onNodeWithText("Dar de alta").assertIsDisplayed()
+        compose.onNodeWithText("Apagar").assertDoesNotExist()
     }
 
     @Test
-    fun `fila offline muestra estado off y accion encender`() {
+    fun `fila descubierta offline muestra solo dar de alta`() {
+        // UX-DR5: descubierta → SOLO Alta, aunque esté apagada (no Encender).
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.OFFLINE), onActionTap = {})
+            MachineRow(machine = machine(MachineStatus.OFFLINE, managed = false), onActionTap = {})
+        }
+        compose.onNodeWithText("Apagada").assertIsDisplayed()
+        compose.onNodeWithText("Dar de alta").assertIsDisplayed()
+        compose.onNodeWithText("Encender").assertDoesNotExist()
+    }
+
+    @Test
+    fun `fila gestionada offline muestra estado off y accion encender`() {
+        compose.setContent {
+            MachineRow(machine = machine(MachineStatus.OFFLINE, managed = true), onActionTap = {})
         }
         compose.onNodeWithText("Desktop").assertIsDisplayed()
         compose.onNodeWithText("Apagada").assertIsDisplayed()
         compose.onNodeWithText("Encender").assertIsDisplayed()
+        compose.onNodeWithText("Dar de alta").assertDoesNotExist()
     }
 
     @Test
@@ -84,7 +98,7 @@ class MachineRowTest {
     @Test
     fun `fila sin mac omite el separador y solo muestra la ip`() {
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.OFFLINE, mac = null), onActionTap = {})
+            MachineRow(machine = machine(MachineStatus.OFFLINE, managed = true, mac = null), onActionTap = {})
         }
         compose.onNodeWithText("192.168.1.10").assertIsDisplayed()
     }
@@ -93,10 +107,29 @@ class MachineRowTest {
     fun `tap en accion notifica al padre (acciones renderizadas, logica en epic 2)`() {
         var tapped: Machine? = null
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.OFFLINE), onActionTap = { tapped = it })
+            MachineRow(machine = machine(MachineStatus.OFFLINE, managed = true), onActionTap = { tapped = it })
         }
         compose.onNodeWithText("Encender").performClick()
         assertThat(tapped).isNotNull()
         assertThat(tapped?.name).isEqualTo("Desktop")
+    }
+
+    @Test
+    fun `boton escanear muestra spinner sin reduce motion`() {
+        // qualifiers = "es": el texto literal ES del string está disponible.
+        compose.setContent {
+            ScanNowButton(scanning = true, reduceMotion = false, onClick = {})
+        }
+        compose.onNodeWithText("Escaneando…").assertIsDisplayed()
+        compose.onNodeWithTag("scan_spinner").assertIsDisplayed()
+    }
+
+    @Test
+    fun `boton escanear con reduce motion muestra solo texto`() {
+        compose.setContent {
+            ScanNowButton(scanning = true, reduceMotion = true, onClick = {})
+        }
+        compose.onNodeWithText("Escaneando…").assertIsDisplayed()
+        compose.onNodeWithTag("scan_spinner").assertDoesNotExist()
     }
 }
