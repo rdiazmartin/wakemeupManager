@@ -1,0 +1,66 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 09-13-2026 16:27
+last_updated: 09-13-2026 16:27
+project: wakemeupManager
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+development_status:
+  epic-1: backlog
+  1-1-esqueleto-del-be-hexagonal-config-y-despliegue-base: backlog
+  1-2-descubrimiento-de-máquinas-escaneo-del-rango: backlog
+  1-3-estado-online-offline-con-ttl: backlog
+  1-4-api-de-inventario-y-tokens-de-dispositivo: backlog
+  1-5-listado-de-máquinas-en-la-app-tema-oscuro-poll-y-escanear-ah: backlog
+  1-6-primer-arranque-y-configuración-de-conexión: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-alta-de-máquinas-con-password-de-un-solo-uso-asyncssh: backlog
+  2-2-encendido-por-wol-magic-packet-al-broadcast-local: backlog
+  2-3-apagado-por-ssh-con-verificación-de-fingerprint: backlog
+  2-4-botones-encender-apagar-alta-en-la-app-ux-dr3-ux-dr5-ux-dr6: backlog
+  2-5-gestión-de-tokens-y-registro-de-actividad-cli-logs: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-servidor-mcp-con-tools-de-lectura-y-control: backlog
+  3-2-autenticación-y-alcance-del-mcp-token-dedicado-solo-tailnet: backlog
+  3-3-bus-de-eventos-stream-sse-en-el-be-ad-11: backlog
+  3-4-suscripción-sse-en-la-app-con-fallback-de-polling: backlog
+  epic-3-retrospective: optional
+
+  epic-4: backlog
+  4-1-despliegue-operacional-completo-del-be: backlog
+  4-2-onboarding-completo-y-estados-de-error-ux-dr4-ux-dr9: backlog
+  4-3-accesibilidad-completa-ux-dr8: backlog
+  epic-4-retrospective: optional
