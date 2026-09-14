@@ -24,4 +24,26 @@
     <!-- Row content -->
     <string name="machine_ip_label">IP</string>
     <string name="machine_mac_label">MAC</string>
+
+    <!-- First run (story 1.6, UX-DR4) -->
+    <string name="first_run_title">Connect to your network</string>
+    <string name="first_run_body">Set the address and key of your server to view and manage the machines on your network.</string>
+    <string name="first_run_configure">Configure</string>
+
+    <!-- Settings (story 1.6, UX-DR9) -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_back">Back</string>
+    <string name="settings_intro">Tell us where your server runs and your device key. We validate them before saving.</string>
+    <string name="settings_url_label">Server address</string>
+    <string name="settings_url_hint">http://10.0.0.1:8000</string>
+    <string name="settings_url_helper">Just the server address; the app completes the rest.</string>
+    <string name="settings_token_label">Device key</string>
+    <string name="settings_token_show">Show key</string>
+    <string name="settings_token_hide">Hide key</string>
+    <string name="settings_saving">Checking…</string>
+    <string name="settings_save">Save and connect</string>
+    <string name="settings_error_format">The address must start with http:// or https://</string>
+    <string name="settings_error_token_rejected">Token rejected — check your settings</string>
+    <string name="settings_error_unreachable">Server unreachable — check the address and your connection</string>
+    <string name="machines_open_settings">Open settings</string>
 </resources>

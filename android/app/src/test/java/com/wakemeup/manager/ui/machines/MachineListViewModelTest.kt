@@ -17,6 +17,7 @@ import io.ktor.http.headersOf
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -416,6 +417,63 @@ class MachineListViewModelTest {
         assertThat(m.name).isEqualTo("Desktop")
         assertThat(m.status).isEqualTo(MachineStatus.ONLINE)
         assertThat(m.managed).isFalse()
+    }
+
+    @Test
+    fun `401 en fetch emite sesion invalida sin marcar offline`() = runTest {
+        val unauthorized = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client {
+                respond(
+                    """{"error":{"code":"unauthorized","message":"revocado"}}""",
+                    HttpStatusCode.Unauthorized,
+                    jsonHeaders(),
+                )
+            },
+        )
+        val vm = newViewModel(unauthorized)
+        val seen = mutableListOf<Unit>()
+        // No hay collect en el test: usamos un collect en backgroundScope.
+        backgroundScope.launch { vm.sessionInvalid.collect { seen.add(it) } }
+        vm.start()
+        runCurrent()
+
+        assertThat(seen).hasSize(1)
+        // Un 401 NO es un fallo de red: el badge de offline no se activa.
+        assertThat(vm.uiState.value.isOffline).isFalse()
+    }
+
+    @Test
+    fun `401 en scan emite sesion invalida`() = runTest {
+        val unauthorized = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else ->
+                        respond(
+                            """{"error":{"code":"unauthorized","message":"revocado"}}""",
+                            HttpStatusCode.Unauthorized,
+                            jsonHeaders(),
+                        )
+                }
+            },
+        )
+        val vm = newViewModel(unauthorized)
+        val seen = mutableListOf<Unit>()
+        backgroundScope.launch { vm.sessionInvalid.collect { seen.add(it) } }
+        vm.start()
+        runCurrent()
+
+        vm.scanNow()
+        runCurrent()
+
+        assertThat(seen).hasSize(1)
+        // El 401 del scan tampoco es un fallo de red: sin badge de offline,
+        // y el refresco posterior (que también recibe 401) no lo marca.
+        assertThat(vm.uiState.value.isOffline).isFalse()
+        assertThat(vm.uiState.value.isScanning).isFalse()
     }
 
     @Test

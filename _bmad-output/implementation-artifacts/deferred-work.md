@@ -10,3 +10,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-2-descubrimiento-de-maquinas.md`
   summary: own_interfaces con rc!=0 (o timeout) devuelve set() silencioso: el BE podría no auto-excluirse.
   evidence: riesgo asumido y documentado; mitigación parcial (loopback/tailnet se excluyen por rango propio). Revisar con el instalador 4.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-1-6-primer-arranque-y-configuracion-de-conexion.md`
+  summary: KeystoreSecretStore (producción, en cada arranque) sin ninguna ejecución automatizada: Robolectric no simula AndroidKeyStore.
+  evidence: verification-gap 1.6: todos los tests usan dobles en memoria; la construcción de MasterKey/EncryptedSharedPreferences lanza AndroidKeyStore not found en JVM. Requiere verificación en dispositivo (primer arranque real + re-arranque con sesión persistida) o androidTest instrumentado.

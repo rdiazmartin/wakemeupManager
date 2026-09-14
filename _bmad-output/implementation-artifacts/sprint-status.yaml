@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-13-2026 16:27
-last_updated: 09-13-2026 20:05
+last_updated: 09-14-2026 12:15
 project: wakemeupManager
 project_key: NOKEY
 tracking_system: file-system
@@ -41,7 +41,7 @@ development_status:
   1-3-estado-online-offline-con-ttl: done
   1-4-api-de-inventario-y-tokens-de-dispositivo: done
   1-5-listado-de-máquinas-en-la-app-tema-oscuro-poll-y-escanear-ah: done
-  1-6-primer-arranque-y-configuración-de-conexión: backlog
+  1-6-primer-arranque-y-configuración-de-conexión: review
   epic-1-retrospective: optional
 
   epic-2: backlog

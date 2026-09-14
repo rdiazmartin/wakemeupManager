@@ -24,4 +24,26 @@
     <!-- Contenido de fila -->
     <string name="machine_ip_label">IP</string>
     <string name="machine_mac_label">MAC</string>
+
+    <!-- Primer arranque (story 1.6, UX-DR4) -->
+    <string name="first_run_title">Conecta con tu red</string>
+    <string name="first_run_body">Configura la dirección y la clave de tu servidor para ver y gestionar las máquinas de tu red.</string>
+    <string name="first_run_configure">Configurar</string>
+
+    <!-- Ajustes (story 1.6, UX-DR9) -->
+    <string name="settings_title">Ajustes</string>
+    <string name="settings_back">Volver</string>
+    <string name="settings_intro">Indica dónde corre tu servidor y la clave de tu dispositivo. La validamos antes de guardar.</string>
+    <string name="settings_url_label">Dirección del servidor</string>
+    <string name="settings_url_hint">http://10.0.0.1:8000</string>
+    <string name="settings_url_helper">Solo añade el servidor; la app completa el resto.</string>
+    <string name="settings_token_label">Clave de dispositivo</string>
+    <string name="settings_token_show">Mostrar clave</string>
+    <string name="settings_token_hide">Ocultar clave</string>
+    <string name="settings_saving">Comprobando…</string>
+    <string name="settings_save">Guardar y conectar</string>
+    <string name="settings_error_format">La dirección debe empezar por http:// o https://</string>
+    <string name="settings_error_token_rejected">Token rechazado — revisa los ajustes</string>
+    <string name="settings_error_unreachable">BE inalcanzable — revisa la dirección y tu conexión</string>
+    <string name="machines_open_settings">Abrir ajustes</string>
 </resources>

@@ -22,6 +22,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -54,6 +55,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.wakemeup.manager.R
+import com.wakemeup.manager.data.local.SettingsRepository
+import com.wakemeup.manager.data.remote.WakemeupApi
 import com.wakemeup.manager.domain.Machine
 import com.wakemeup.manager.ui.theme.AccentMint
 import com.wakemeup.manager.ui.theme.GraphiteBase
@@ -72,12 +75,24 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MachineListScreen(
-    viewModel: MachineListViewModel = viewModel(
-        factory = MachineListViewModel.createFactory(),
-    ),
+    viewModel: MachineListViewModel? = null,
     modifier: Modifier = Modifier,
+    onOpenSettings: () -> Unit = {},
 ) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    // Si no se inyecta (MainActivity), la pantalla crea su ViewModel con la
+    // configuración segura del dispositivo (Keystore + cifrado, story 1.6).
+    // El contexto se captura ANTES del remember (LocalContext es @Composable);
+    // la rama de fallback solo se compone con viewModel null.
+    val resolvedViewModel: MachineListViewModel = if (viewModel == null) {
+        val fallbackContext = LocalContext.current.applicationContext
+        val fallbackApi = remember {
+            WakemeupApi(SettingsRepository.secure(fallbackContext))
+        }
+        viewModel(factory = MachineListViewModel.createFactory(api = fallbackApi))
+    } else {
+        viewModel
+    }
+    val uiState by resolvedViewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -105,11 +120,11 @@ fun MachineListScreen(
         awaitDispose { context.unregisterReceiver(receiver) }
     }
     LaunchedEffect(batterySaver) {
-        viewModel.setBatterySaver(batterySaver)
+        resolvedViewModel.setBatterySaver(batterySaver)
     }
 
     LaunchedEffect(Unit) {
-        viewModel.start()
+        resolvedViewModel.start()
     }
 
     Scaffold(
@@ -129,8 +144,20 @@ fun MachineListScreen(
                     ScanNowButton(
                         scanning = uiState.isScanning,
                         reduceMotion = isReduceMotionEnabled(),
-                        onClick = viewModel::scanNow,
+                        onClick = resolvedViewModel::scanNow,
                     )
+                    IconButton(
+                        onClick = onOpenSettings,
+                        modifier = Modifier
+                            .padding(horizontal = 8.dp)
+                            .size(48.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Settings,
+                            contentDescription = stringResource(R.string.machines_open_settings),
+                            tint = InkSecondary,
+                        )
+                    }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = GraphiteBase,
@@ -148,13 +175,13 @@ fun MachineListScreen(
             when {
                 uiState.isLoading -> SkeletonList()
                 uiState.isEmpty -> EmptyState(
-                    onScan = viewModel::scanNow,
+                    onScan = resolvedViewModel::scanNow,
                     scanning = uiState.isScanning,
                 )
                 else -> MachineList(
                     machines = uiState.machines,
                     isRefreshing = uiState.isRefreshing,
-                    onRefresh = { viewModel.refresh() },
+                    onRefresh = { resolvedViewModel.refresh() },
                     onActionTap = {
                         scope.launch {
                             snackbarHostState.showSnackbar(

@@ -57,6 +57,25 @@ class WakemeupApi(
         }
     }
 
+    /**
+     * Valida unas credenciales CONTRA `GET /machines` (decisión 1.6, OQ-1):
+     * el healthcheck `/status` está exento de auth en el BE (AD-6) y nunca
+     * devolvería 401; `/machines` es el único endpoint autenticado del
+     * contrato 1.4 y distingue token rechazado (`ApiException` 401), BE
+     * inalcanzable (excepción de transporte) y conexión OK (200).
+     *
+     * Recibe la URL y el token A VALIDAR (los del formulario), no la caché
+     * del [com.wakemeup.manager.data.local.SettingsRepository]: en el primer
+     * arranque la caché está vacía y una validación contra ella fallaría
+     * siempre en un dispositivo real.
+     */
+    suspend fun validateConnection(apiUrl: String, deviceToken: String) {
+        val response: HttpResponse = client.get("$apiUrl/machines") {
+            bearerAuth(deviceToken)
+        }
+        if (!response.status.isSuccessCode()) throw response.toApiException("/machines")
+    }
+
     private suspend fun HttpResponse.toApiException(endpointNote: String): ApiException {
         return try {
             val payload = body<ApiErrorEnvelopeDto>()

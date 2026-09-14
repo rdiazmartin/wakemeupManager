@@ -15,8 +15,11 @@ import com.wakemeup.manager.domain.Machine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -51,6 +54,39 @@ class MachineListViewModel(
 
     private val _uiState = MutableStateFlow(MachineListUiState())
     val uiState: StateFlow<MachineListUiState> = _uiState.asStateFlow()
+
+    /**
+     * Sesión inválida (401 del BE, story 1.6): se emite cuando un refresh o un
+     * escaneo recibe `unauthorized` (envelope 1.4) — nunca el badge de offline,
+     * que queda para fallos de red. `MainActivity` la escucha y redirige a
+     * ajustes. Replay=1: si el colector aún no está suscrito (o un 401 llega
+     * justo antes de suscribirse en la recreación del ViewModel), el evento
+     * no se pierde.
+     */
+    private val _sessionInvalid = MutableSharedFlow<Unit>(replay = 1)
+    val sessionInvalid: SharedFlow<Unit> = _sessionInvalid.asSharedFlow()
+
+    /**
+     * Detiene el polling y cancela los jobs en vuelo. `MainActivity` la usa
+     * al abandonar la pantalla (navegación a ajustes) para que el ViewModel
+     * no siga pidiendo contra una sesión revocada/vacía.
+     */
+    fun stop() {
+        pollJob?.cancel()
+        pollJob = null
+        refreshJob?.cancel()
+        refreshJob = null
+    }
+
+    /**
+     * Elimina el replay del evento de sesión inválida tras ser manejado:
+     * si el usuario re-guarda las mismas credenciales y el ViewModel se
+     * reutiliza (misma key), un 401 antiguo re-jugado provocaría un bucle
+     * de redirección a ajustes.
+     */
+    fun sessionInvalidHandled() {
+        _sessionInvalid.resetReplayCache()
+    }
 
     private var pollJob: Job? = null
     /** Serializa los refrescos: cada nueva llamada cancela el anterior (último gana). */
@@ -99,19 +135,26 @@ class MachineListViewModel(
                         )
                     }
                 }
-                .onFailure { _ ->
-                    val cached = cache.get()
-                    _uiState.update {
-                        it.copy(
-                            isLoading = false,
-                            // Caché en memoria: muestra la última lista OK si existe (UX-DR4).
-                            machines = if (cached.isNotEmpty()) cached else it.machines,
-                            // El empty state ("No se encontraron máquinas") solo se muestra
-                            // con 200 [] real; un fallo de red nunca lo finge (badge en su lugar).
-                            isEmpty = false,
-                            isOffline = true,
-                            isRefreshing = false,
-                        )
+                .onFailure { e ->
+                    // 401 (token revocado/expirado) no es offline: es sesión inválida
+                    // (story 1.6) → se emite el evento y se deja la lista tal cual.
+                    if (e is ApiException && e.code == "unauthorized") {
+                        _uiState.update { it.copy(isRefreshing = false) }
+                        _sessionInvalid.tryEmit(Unit)
+                    } else {
+                        val cached = cache.get()
+                        _uiState.update {
+                            it.copy(
+                                isLoading = false,
+                                // Caché en memoria: muestra la última lista OK si existe (UX-DR4).
+                                machines = if (cached.isNotEmpty()) cached else it.machines,
+                                // El empty state ("No se encontraron máquinas") solo se muestra
+                                // con 200 [] real; un fallo de red nunca lo finge (badge en su lugar).
+                                isEmpty = false,
+                                isOffline = true,
+                                isRefreshing = false,
+                            )
+                        }
                     }
                 }
         }
@@ -122,7 +165,14 @@ class MachineListViewModel(
         if (_uiState.value.isScanning) return@withScopeOrNothing  // nunca dos POST en paralelo
         _uiState.update { it.copy(isScanning = true) }
         runCatching { api.triggerScan() }
-            .onFailure { _uiState.update { it.copy(isOffline = true) } }
+            // 401 en /scan también es sesión inválida (el token viaja en cada petición).
+            .onFailure {
+                if (it is ApiException && it.code == "unauthorized") {
+                    _sessionInvalid.tryEmit(Unit)
+                } else {
+                    _uiState.update { it.copy(isOffline = true) }
+                }
+            }
         _uiState.update { it.copy(isScanning = false) }
         refresh()
     }
@@ -149,9 +199,13 @@ class MachineListViewModel(
     companion object {
         const val DEFAULT_POLL_INTERVAL_MS = 30_000L
 
-        /** Factory que cablea la red (Ktor + BuildConfig) y la caché en memoria. */
+        /**
+         * Factory que cablea la red y la caché en memoria. La [WakemeupApi] la
+         * construye `MainActivity` sobre la [com.wakemeup.manager.data.local.SettingsRepository]
+         * segura (Keystore + cifrado, story 1.6); en tests se inyectan dobles.
+         */
         fun createFactory(
-            api: WakemeupApi = WakemeupApi(com.wakemeup.manager.data.local.InMemorySettingsRepository()),
+            api: WakemeupApi,
             cache: MachinesCache = MachinesCache(),
         ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
