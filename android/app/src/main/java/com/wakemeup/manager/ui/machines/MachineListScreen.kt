@@ -19,16 +19,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -40,9 +45,9 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +56,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -64,7 +72,6 @@ import com.wakemeup.manager.ui.theme.GraphiteRaised
 import com.wakemeup.manager.ui.theme.InkPrimary
 import com.wakemeup.manager.ui.theme.InkSecondary
 import com.wakemeup.manager.ui.theme.WarningAmber
-import kotlinx.coroutines.launch
 
 /**
  * Pantalla de listado de máquinas (FR-12 + UX-DR4): polling 30 s pausable en
@@ -93,9 +100,37 @@ fun MachineListScreen(
         viewModel
     }
     val uiState by resolvedViewModel.uiState.collectAsStateWithLifecycle()
+    val dialog by resolvedViewModel.dialog.collectAsStateWithLifecycle()
+    val pendingAction by resolvedViewModel.pendingAction.collectAsStateWithLifecycle()
+    val enrollError by resolvedViewModel.enrollError.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    // Snackbar de resultados de acción (UX-DR7): consume los mensajes SECUENCIALMENTE
+    // (un solo collector que espera a que showSnackbar termine antes de sacar el
+    // siguiente) — un mensaje que llega mientras otro se muestra NO cancela el
+    // visible (LaunchedEffect(key) con key variable lo cancelaría a mitad).
+    fun resolveActionText(text: String): String = when (text) {
+        MachineListViewModel.MESSAGE_ALTA -> context.getString(R.string.action_message_alta_ok)
+        MachineListViewModel.MESSAGE_WAKE -> context.getString(R.string.action_message_wake_ok)
+        MachineListViewModel.MESSAGE_SHUTDOWN -> context.getString(R.string.action_message_shutdown_ok)
+        else -> text
+    }
+    val messageEvents = remember { kotlinx.coroutines.flow.MutableSharedFlow<ActionMessage>(extraBufferCapacity = 16) }
+    LaunchedEffect(resolvedViewModel) {
+        // Sondeo barato del cola de mensajes del ViewModel (consumo único).
+        while (true) {
+            resolvedViewModel.consumeActionMessage()?.let { messageEvents.tryEmit(it) }
+            kotlinx.coroutines.delay(250)
+        }
+    }
+    LaunchedEffect(resolvedViewModel, messageEvents) {
+        messageEvents.collect { msg ->
+            // showSnackbar suspende hasta que el actual se oculta: el siguiente
+            // mensaje espera sin cancelar el visible (cola FIFO).
+            snackbarHostState.showSnackbar(resolveActionText(msg.text))
+        }
+    }
 
     // Ahorro de batería reactivo: también se re-evalúa cuando el sistema lo
     // activa/desactiva en caliente (ACTION_POWER_SAVE_MODE_CHANGED).
@@ -125,6 +160,29 @@ fun MachineListScreen(
 
     LaunchedEffect(Unit) {
         resolvedViewModel.start()
+    }
+
+    // Diálogos (UX-DR3/DR6): siempre sobre el Scaffold; el de apagado se
+    // anuncia como diálogo (a11y). `inFlight = pendingAction != null` (CUALQUIER
+    // máquina): mientras una acción vuela, los botones de confirmar quedan
+    // deshabilitados (un tap no se descarta en silencio).
+    when (val d = dialog) {
+        is MachineDialog.Enroll -> EnrollDialog(
+            machine = d.machine,
+            inFlight = pendingAction != null,
+            error = enrollError,
+            onConfirm = { usuario, password ->
+                resolvedViewModel.enroll(d.machine, usuario, password)
+            },
+            onDismiss = resolvedViewModel::dismissDialog,
+        )
+        is MachineDialog.Shutdown -> ShutdownDialog(
+            machine = d.machine,
+            inFlight = pendingAction != null,
+            onConfirm = { resolvedViewModel.shutdown(d.machine) },
+            onDismiss = resolvedViewModel::dismissDialog,
+        )
+        null -> Unit
     }
 
     Scaffold(
@@ -182,13 +240,9 @@ fun MachineListScreen(
                     machines = uiState.machines,
                     isRefreshing = uiState.isRefreshing,
                     onRefresh = { resolvedViewModel.refresh() },
-                    onActionTap = {
-                        scope.launch {
-                            snackbarHostState.showSnackbar(
-                                message = context.getString(R.string.machine_action_noop_info),
-                            )
-                        }
-                    },
+                    onEnroll = resolvedViewModel::openEnrollDialog,
+                    onWake = resolvedViewModel::wake,
+                    onShutdown = resolvedViewModel::openShutdownDialog,
                 )
             }
         }
@@ -280,7 +334,9 @@ private fun MachineList(
     machines: List<Machine>,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
-    onActionTap: (Machine) -> Unit,
+    onEnroll: (Machine) -> Unit,
+    onWake: (Machine) -> Unit,
+    onShutdown: (Machine) -> Unit,
 ) {
     PullToRefreshBox(
         isRefreshing = isRefreshing,
@@ -294,7 +350,9 @@ private fun MachineList(
             items(machines, key = { it.id }) { machine ->
                 MachineRow(
                     machine = machine,
-                    onActionTap = onActionTap,
+                    onEnroll = onEnroll,
+                    onWake = onWake,
+                    onShutdown = onShutdown,
                 )
                 HorizontalDivider(
                     modifier = Modifier.padding(horizontal = 16.dp),
@@ -351,4 +409,165 @@ private fun EmptyState(onScan: () -> Unit, scanning: Boolean) {
             }
         }
     }
+}
+
+/**
+ * Diálogo de confirmación de apagado (UX-DR3): SIEMPRE antes de ejecutar el
+ * shutdown; anunciado como diálogo para TalkBack. "Apagar" con loader mientras
+ * la acción vuela; Cancelar cierra sin ejecutar.
+ */
+@Composable
+private fun ShutdownDialog(
+    machine: Machine,
+    inFlight: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { if (!inFlight) onDismiss() },
+        title = { Text(stringResource(R.string.shutdown_dialog_title)) },
+        text = {
+            Text(
+                stringResource(
+                    R.string.shutdown_dialog_body,
+                    machine.name,
+                )
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = !inFlight,
+                modifier = Modifier.testTag("shutdown_dialog_confirm"),
+            ) {
+                if (inFlight) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
+                Text(stringResource(R.string.shutdown_dialog_confirm))
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !inFlight,
+                modifier = Modifier.testTag("shutdown_dialog_cancel"),
+            ) {
+                Text(stringResource(R.string.shutdown_dialog_cancel))
+            }
+        },
+    )
+}
+
+/**
+ * Diálogo de alta con password de un solo uso (UX-DR6): campos Usuario +
+ * Password (con toggle de visibilidad), aviso "La password se usa una sola vez
+ * y no se guarda", CTA "Dar de alta" con progreso mientras vuela y error inline
+ * (la password se reintroduce). La password no se persiste en NINGÚN almacén.
+ */
+@Composable
+private fun EnrollDialog(
+    machine: Machine,
+    inFlight: Boolean,
+    error: String?,
+    onConfirm: (usuario: String, password: String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var usuario by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var passwordVisible by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = { if (!inFlight) onDismiss() },
+        title = { Text(stringResource(R.string.enroll_dialog_title, machine.name)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = usuario,
+                    onValueChange = { usuario = it },
+                    label = { Text(stringResource(R.string.enroll_dialog_user_label)) },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("enroll_user_field"),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text(stringResource(R.string.enroll_dialog_password_label)) },
+                    singleLine = true,
+                    visualTransformation = if (passwordVisible) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                            Icon(
+                                imageVector = if (passwordVisible) {
+                                    Icons.Outlined.VisibilityOff
+                                } else {
+                                    Icons.Outlined.Visibility
+                                },
+                                contentDescription = stringResource(
+                                    if (passwordVisible) {
+                                        R.string.enroll_dialog_hide_password
+                                    } else {
+                                        R.string.enroll_dialog_show_password
+                                    }
+                                ),
+                            )
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("enroll_password_field"),
+                )
+                Text(
+                    text = stringResource(R.string.enroll_dialog_once_hint),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = InkSecondary,
+                )
+                if (error != null) {
+                    Text(
+                        text = error,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.testTag("enroll_error"),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (usuario.isNotBlank() && password.isNotBlank()) {
+                        onConfirm(usuario, password)
+                    }
+                },
+                enabled = !inFlight && usuario.isNotBlank() && password.isNotBlank(),
+                modifier = Modifier.testTag("enroll_dialog_confirm"),
+            ) {
+                if (inFlight) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
+                Text(stringResource(R.string.enroll_dialog_confirm))
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                enabled = !inFlight,
+                modifier = Modifier.testTag("enroll_dialog_cancel"),
+            ) {
+                Text(stringResource(R.string.enroll_dialog_cancel))
+            }
+        },
+    )
 }

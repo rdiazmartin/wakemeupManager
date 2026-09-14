@@ -1,8 +1,9 @@
 """Configuración del BE (convención del spine): `config.toml` + override env.
 
-Sección `[scan]` (1.2), `[db]` y `[auth]` (1.4). Sin fichero, se usan los
-defaults de código (escaneo cada 600 s, TTL 60 s, rango 192.168.1.0/24,
-DB `wakemeup.db` en CWD, backoff 5 fallos/5 min → 429/15 min).
+Sección `[scan]` (1.2), `[db]` y `[auth]` (1.4), `[ssh]` y `[shutdown]` (2.1/2.3).
+Sin fichero, se usan los defaults de código (escaneo cada 600 s, TTL 60 s,
+rango 192.168.1.0/24, DB `wakemeup.db` en CWD, backoff 5 fallos/5 min →
+429/15 min, par de claves Ed25519 del BE, comando de apagado systemd).
 """
 from __future__ import annotations
 
@@ -49,8 +50,34 @@ class AuthSettings(BaseModel):
     block_seconds: int = Field(default=900, ge=1)
 
 
+class SshSettings(BaseModel):
+    """Sección `[ssh]` del config.toml (alta, story 2.1; AD-5/AD-9).
+
+    Ruta del par de claves Ed25519 del BE (la privada con permisos 600, la usa
+    solo el servicio como usuario no-root). `remote_home` es la ruta ABSOLUTA
+    del home remoto usado para instalar `authorized_keys` (p. ej. `/home/maria`);
+    vacía → se resuelve con `sftp.realpath(".")` del usuario conectado; `~`
+    explícito es error (SFTP no expande el tilde). La password del alta vive
+    solo en memoria del proceso (FR-6) — jamás en esta configuración.
+    """
+
+    key_path: str = "id_ed25519"
+    remote_home: str = ""
+
+
+class ShutdownSettings(BaseModel):
+    """Sección `[shutdown]` del config.toml (apagado, story 2.3; AD-4).
+
+    Comando único y sin shell libre ejecutado vía asyncssh como `remote_user`.
+    Requiere sudoers NOPASSWD en la máquina remota restringido a este comando.
+    """
+
+    command: str = "sudo -n systemctl poweroff"
+
+
 class Settings(BaseSettings):
-    """Configuración completa; `[scan]` desde la story 1.2, `[db]`/`[auth]` desde 1.4."""
+    """Configuración completa; `[scan]` desde 1.2, `[db]`/`[auth]` desde 1.4,
+    `[ssh]`/`[shutdown]` desde el epic 2."""
 
     model_config = SettingsConfigDict(
         env_prefix="WAKEMEUP_",
@@ -61,6 +88,8 @@ class Settings(BaseSettings):
     scan: ScanSettings = Field(default_factory=ScanSettings)
     db: DbSettings = Field(default_factory=DbSettings)
     auth: AuthSettings = Field(default_factory=AuthSettings)
+    ssh: SshSettings = Field(default_factory=SshSettings)
+    shutdown: ShutdownSettings = Field(default_factory=ShutdownSettings)
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):

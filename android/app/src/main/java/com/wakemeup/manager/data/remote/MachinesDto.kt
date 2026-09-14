@@ -59,6 +59,17 @@ data class ScanEnvelopeDto(
     val scan: ScanDto,
 )
 
+/**
+ * Cuerpo del alta (contrato 2.1): `POST /machines/{id}/enroll` con
+ * `{usuario, password}`. La password se transmite una sola vez y nunca se
+ * persiste en la app (UX-DR6) ni en el BE (FR-6).
+ */
+@Serializable
+data class EnrollRequestDto(
+    val usuario: String,
+    val password: String,
+)
+
 @Serializable
 data class ApiErrorPayloadDto(
     val code: String,

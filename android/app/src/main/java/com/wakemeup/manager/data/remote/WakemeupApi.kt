@@ -8,8 +8,11 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.get
 import io.ktor.client.request.post
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.json.Json
@@ -55,6 +58,36 @@ class WakemeupApi(
         } catch (_: Exception) {
             throw ApiException("bad_response", "respuesta inválida de /scan")
         }
+    }
+
+    /**
+     * Alta de una máquina descubierta (epic 2, contrato 2.1): `POST /machines/{id}/enroll`.
+     * Body `{usuario, password}`: la password se usa UNA sola vez en el BE (FR-6),
+     * no se guarda en el servidor; la app tampoco la persiste (UX-DR6).
+     */
+    suspend fun enrollMachine(id: Int, usuario: String, password: String) {
+        val response: HttpResponse = client.post("${settings.apiUrl}/machines/$id/enroll") {
+            bearerAuth(settings.deviceToken)
+            contentType(io.ktor.http.ContentType.Application.Json)
+            setBody(EnrollRequestDto(usuario = usuario, password = password))
+        }
+        if (!response.status.isSuccessCode()) throw response.toApiException("/machines/$id/enroll")
+    }
+
+    /** Wake on LAN (epic 2, contrato 2.2): `POST /machines/{id}/wake`. Sin body. */
+    suspend fun wakeMachine(id: Int) {
+        val response: HttpResponse = client.post("${settings.apiUrl}/machines/$id/wake") {
+            bearerAuth(settings.deviceToken)
+        }
+        if (!response.status.isSuccessCode()) throw response.toApiException("/machines/$id/wake")
+    }
+
+    /** Apagado por SSH (epic 2, contrato 2.3): `POST /machines/{id}/shutdown`. Sin body. */
+    suspend fun shutdownMachine(id: Int) {
+        val response: HttpResponse = client.post("${settings.apiUrl}/machines/$id/shutdown") {
+            bearerAuth(settings.deviceToken)
+        }
+        if (!response.status.isSuccessCode()) throw response.toApiException("/machines/$id/shutdown")
     }
 
     /**

@@ -44,7 +44,12 @@ class MachineRowTest {
     @Test
     fun `fila descubierta online muestra nombre punto ip mac y accion dar de alta`() {
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.ONLINE, managed = false), onActionTap = {})
+            MachineRow(
+                machine = machine(MachineStatus.ONLINE, managed = false),
+                onEnroll = {},
+                onWake = {},
+                onShutdown = {},
+            )
         }
         compose.onNodeWithText("Desktop").assertIsDisplayed()
         compose.onNodeWithText("192.168.1.10 · AA:BB:CC:DD:EE:FF").assertIsDisplayed()
@@ -57,7 +62,12 @@ class MachineRowTest {
     fun `fila descubierta offline muestra solo dar de alta`() {
         // UX-DR5: descubierta → SOLO Alta, aunque esté apagada (no Encender).
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.OFFLINE, managed = false), onActionTap = {})
+            MachineRow(
+                machine = machine(MachineStatus.OFFLINE, managed = false),
+                onEnroll = {},
+                onWake = {},
+                onShutdown = {},
+            )
         }
         compose.onNodeWithText("Apagada").assertIsDisplayed()
         compose.onNodeWithText("Dar de alta").assertIsDisplayed()
@@ -67,7 +77,12 @@ class MachineRowTest {
     @Test
     fun `fila gestionada offline muestra estado off y accion encender`() {
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.OFFLINE, managed = true), onActionTap = {})
+            MachineRow(
+                machine = machine(MachineStatus.OFFLINE, managed = true),
+                onEnroll = {},
+                onWake = {},
+                onShutdown = {},
+            )
         }
         compose.onNodeWithText("Desktop").assertIsDisplayed()
         compose.onNodeWithText("Apagada").assertIsDisplayed()
@@ -78,7 +93,12 @@ class MachineRowTest {
     @Test
     fun `fila gestionada online muestra accion apagar con borde`() {
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.ONLINE, managed = true), onActionTap = {})
+            MachineRow(
+                machine = machine(MachineStatus.ONLINE, managed = true),
+                onEnroll = {},
+                onWake = {},
+                onShutdown = {},
+            )
         }
         compose.onNodeWithText("Encendida").assertIsDisplayed()
         compose.onNodeWithText("Apagar").assertIsDisplayed()
@@ -87,7 +107,12 @@ class MachineRowTest {
     @Test
     fun `fila no fiable muestra badge y ninguna accion destructiva`() {
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.NO_FIABLE, managed = true), onActionTap = {})
+            MachineRow(
+                machine = machine(MachineStatus.NO_FIABLE, managed = true),
+                onEnroll = {},
+                onWake = {},
+                onShutdown = {},
+            )
         }
         compose.onNodeWithText("No fiable").assertIsDisplayed()
         compose.onNodeWithText("Apagar").assertDoesNotExist()
@@ -98,20 +123,62 @@ class MachineRowTest {
     @Test
     fun `fila sin mac omite el separador y solo muestra la ip`() {
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.OFFLINE, managed = true, mac = null), onActionTap = {})
+            MachineRow(
+                machine = machine(MachineStatus.OFFLINE, managed = true, mac = null),
+                onEnroll = {},
+                onWake = {},
+                onShutdown = {},
+            )
         }
         compose.onNodeWithText("192.168.1.10").assertIsDisplayed()
     }
 
     @Test
-    fun `tap en accion notifica al padre (acciones renderizadas, logica en epic 2)`() {
-        var tapped: Machine? = null
+    fun `tap en dar de alta notifica al padre`() {
+        var enrolled: Machine? = null
         compose.setContent {
-            MachineRow(machine = machine(MachineStatus.OFFLINE, managed = true), onActionTap = { tapped = it })
+            MachineRow(
+                machine = machine(MachineStatus.OFFLINE, managed = false),
+                onEnroll = { enrolled = it },
+                onWake = {},
+                onShutdown = {},
+            )
+        }
+        compose.onNodeWithText("Dar de alta").performClick()
+        assertThat(enrolled).isNotNull()
+        assertThat(enrolled?.name).isEqualTo("Desktop")
+    }
+
+    @Test
+    fun `tap en encender notifica al padre`() {
+        var woken: Machine? = null
+        compose.setContent {
+            MachineRow(
+                machine = machine(MachineStatus.OFFLINE, managed = true),
+                onEnroll = {},
+                onWake = { woken = it },
+                onShutdown = {},
+            )
         }
         compose.onNodeWithText("Encender").performClick()
-        assertThat(tapped).isNotNull()
-        assertThat(tapped?.name).isEqualTo("Desktop")
+        assertThat(woken).isNotNull()
+        assertThat(woken?.name).isEqualTo("Desktop")
+    }
+
+    @Test
+    fun `tap en apagar notifica al padre`() {
+        var shuttingDown: Machine? = null
+        compose.setContent {
+            MachineRow(
+                machine = machine(MachineStatus.ONLINE, managed = true),
+                onEnroll = {},
+                onWake = {},
+                onShutdown = { shuttingDown = it },
+            )
+        }
+        compose.onNodeWithText("Apagar").performClick()
+        assertThat(shuttingDown).isNotNull()
+        assertThat(shuttingDown?.name).isEqualTo("Desktop")
     }
 
     @Test

@@ -1,10 +1,10 @@
-"""Tests de configuración: defaults sin fichero, TOML real y override por env (spec 1.2)."""
+"""Tests de configuración: defaults sin fichero, TOML real y override por env (spec 1.2 + epic 2)."""
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from wakemeup.config import AuthSettings, ScanSettings, Settings
+from wakemeup.config import AuthSettings, ScanSettings, Settings, ShutdownSettings, SshSettings
 
 
 def test_defaults_without_config_file(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,4 +75,29 @@ def test_auth_section_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.auth.block_seconds == 900
     with pytest.raises(ValidationError):
         AuthSettings(max_failures=0)
+
+
+def test_ssh_and_shutdown_sections_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Epic 2: `[ssh]` (claves del BE) y `[shutdown]` (comando único, AC 2.3)."""
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: "/nonexistent/config.toml")
+    settings = Settings()
+    assert settings.ssh.key_path == "id_ed25519"
+    assert settings.ssh.remote_home == ""  # vacío → el alta resuelve el home vía SFTP
+    assert settings.shutdown.command == "sudo -n systemctl poweroff"
+
+
+def test_ssh_and_shutdown_toml_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        "[ssh]\n"
+        'key_path = "/var/lib/wakemeup/keys/id_ed25519"\n'
+        'remote_home = "/home/maria"\n'
+        "[shutdown]\n"
+        'command = "sudo -n shutdown -h now"\n'
+    )
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: str(toml))
+    settings = Settings()
+    assert settings.ssh.key_path == "/var/lib/wakemeup/keys/id_ed25519"
+    assert settings.ssh.remote_home == "/home/maria"
+    assert settings.shutdown.command == "sudo -n shutdown -h now"
 

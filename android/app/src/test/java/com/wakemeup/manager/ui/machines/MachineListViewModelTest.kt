@@ -529,5 +529,350 @@ class MachineListViewModelTest {
             assertThat(vm.uiState.value.isOffline).isFalse()
             assertThat(vm.uiState.value.machines).hasSize(2)
         }
+
+    // --- Epic 2: acciones de fila (alta/wake/shutdown) ---
+
+    private fun managedMachine(id: Int = 1) = Machine(
+        id = id,
+        name = "Gestionada",
+        ip = "192.168.1.20",
+        mac = "AA:BB:CC:DD:EE:02",
+        hostname = "gestionada",
+        status = MachineStatus.OFFLINE,
+        managed = true,
+    )
+
+    private val actionJson = """{"ok":true}"""
+
+    private fun TestScope.controlApi(): Pair<WakemeupApi, MutableList<Pair<String, String>>> {
+        val log = mutableListOf<Pair<String, String>>()  // (method, url)
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository(apiUrl = "http://test/api/v1", deviceToken = "t"),
+            client = client { request ->
+                log.add(request.method.value to request.url.toString())
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else ->
+                        respond(actionJson, HttpStatusCode.OK, jsonHeaders())
+                }
+            },
+        )
+        return api to log
+    }
+
+    @Test
+    fun `wake envia POST y emite snackbar de exito`() = runTest {
+        val (api, log) = controlApi()
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+
+        vm.wake(managedMachine())
+        runCurrent()
+
+        assertThat(log.any { it.first == "POST" && it.second.endsWith("/wake") }).isTrue()
+        val msg = vm.consumeActionMessage()
+        assertThat(msg).isNotNull()
+        assertThat(msg!!.isError).isFalse()
+        assertThat(vm.pendingAction.value).isNull()
+    }
+
+    @Test
+    fun `wake fallido emite mensaje de error y permite reintento`() = runTest {
+        var failing = true
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else -> {
+                        if (failing) {
+                            respond(
+                                """{"error":{"code":"conflict","message":"máquina no gestionada"}}""",
+                                HttpStatusCode.Conflict,
+                                jsonHeaders(),
+                            )
+                        } else {
+                            respond(actionJson, HttpStatusCode.OK, jsonHeaders())
+                        }
+                    }
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+
+        vm.wake(managedMachine())
+        runCurrent()
+        val msg = vm.consumeActionMessage()
+        assertThat(msg).isNotNull()
+        assertThat(msg!!.isError).isTrue()
+        assertThat(vm.pendingAction.value).isNull()
+
+        // Reintento sin salir de la pantalla (UX-DR7).
+        failing = false
+        vm.wake(managedMachine())
+        runCurrent()
+        val ok = vm.consumeActionMessage()
+        assertThat(ok).isNotNull()
+        assertThat(ok!!.isError).isFalse()
+    }
+
+    @Test
+    fun `shutdown envia POST y emite snackbar de exito`() = runTest {
+        val (api, log) = controlApi()
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+
+        vm.shutdown(managedMachine(id = 1).copy(status = MachineStatus.ONLINE))
+        runCurrent()
+
+        assertThat(log.any { it.first == "POST" && it.second.endsWith("/shutdown") }).isTrue()
+        assertThat(vm.pendingAction.value).isNull()
+        val msg = vm.consumeActionMessage()
+        assertThat(msg).isNotNull()
+        assertThat(msg!!.isError).isFalse()
+    }
+
+    @Test
+    fun `enroll envia usuario y password en el POST`() = runTest {
+        val captured = mutableListOf<String>()
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                else -> {
+                    captured.add(
+                        (request.body as io.ktor.http.content.TextContent).text
+                    )
+                    respond(actionJson, HttpStatusCode.OK, jsonHeaders())
+                }
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+
+        vm.enroll(
+            Machine(
+                id = 9, name = "Nueva", ip = "192.168.1.30", mac = null,
+                hostname = "nueva", status = MachineStatus.OFFLINE, managed = false,
+            ),
+            "maria",
+            "s3cr3t",
+        )
+        runCurrent()
+
+        assertThat(captured).hasSize(1)
+        assertThat(captured[0]).contains("\"usuario\":\"maria\"")
+        assertThat(captured[0]).contains("\"password\":\"s3cr3t\"")
+        // Tras el alta se refresca la lista (fruto del BE, FR-2).
+        val msg = vm.consumeActionMessage()
+        assertThat(msg).isNotNull()
+        assertThat(msg!!.isError).isFalse()
+    }
+
+    @Test
+    fun `enroll fallido muestra error inline y el dialogo sigue abierto`() = runTest {
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else ->
+                        respond(
+                            """{"error":{"code":"unauthorized","message":"credenciales incorrectas"}}""",
+                            HttpStatusCode.Unauthorized,
+                            jsonHeaders(),
+                        )
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+        val nueva = Machine(
+            id = 9, name = "Nueva", ip = "192.168.1.30", mac = null,
+            hostname = "nueva", status = MachineStatus.OFFLINE, managed = false,
+        )
+        vm.openEnrollDialog(nueva)
+        vm.enroll(nueva, "maria", "mala")
+        runCurrent()
+
+        assertThat(vm.enrollError.value).contains("credenciales incorrectas")
+        assertThat(vm.pendingAction.value).isNull()
+    }
+
+    @Test
+    fun `401 en wake emite sesion invalida sin snackbar de error`() = runTest {
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else ->
+                        respond(
+                            """{"error":{"code":"unauthorized","message":"revocado"}}""",
+                            HttpStatusCode.Unauthorized,
+                            jsonHeaders(),
+                        )
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        val seen = mutableListOf<Unit>()
+        backgroundScope.launch { vm.sessionInvalid.collect { seen.add(it) } }
+        vm.start()
+        runCurrent()
+
+        vm.wake(managedMachine())
+        runCurrent()
+
+        assertThat(seen).hasSize(1)
+        assertThat(vm.uiState.value.actionMessage).isNull()  // sin snackbar de error
+    }
+
+    @Test
+    fun `no se lanzan acciones paralelas con pendingAction`() = runTest {
+        val postLog = mutableListOf<String>()
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else -> {
+                        postLog.add(request.url.toString())
+                        kotlinx.coroutines.delay(5_000)
+                        respond(actionJson, HttpStatusCode.OK, jsonHeaders())
+                    }
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+
+        vm.wake(managedMachine())
+        runCurrent()
+        assertThat(vm.pendingAction.value).isNotNull()
+        vm.wake(managedMachine())  // segundo tap ignorado mientras vuela
+        advanceTimeBy(5_000L)
+        runCurrent()
+
+        // Solo el primer wake llega al wire (un POST de acción); el refresco
+        // posterior es GET /machines, que no entra en postLog.
+        assertThat(postLog).hasSize(1)
+        assertThat(postLog[0]).endsWith("/wake")
+        assertThat(vm.pendingAction.value).isNull()
+    }
+
+    @Test
+    fun `dialogo de apagado y de alta se gestionan desde el viewmodel`() = runTest {
+        val vm = newViewModel(okApi().first)
+        val shutdownTarget = managedMachine(id = 1).copy(status = MachineStatus.ONLINE)
+        vm.openShutdownDialog(shutdownTarget)
+        assertThat(vm.dialog.value).isInstanceOf(MachineDialog.Shutdown::class.java)
+
+        vm.dismissDialog()
+        assertThat(vm.dialog.value).isNull()
+
+        val target = Machine(
+            id = 9, name = "Nueva", ip = "192.168.1.30", mac = null,
+            hostname = "nueva", status = MachineStatus.OFFLINE, managed = false,
+        )
+        vm.openEnrollDialog(target)
+        assertThat(vm.dialog.value).isInstanceOf(MachineDialog.Enroll::class.java)
+        vm.dismissDialog()
+        assertThat(vm.dialog.value).isNull()
+    }
+
+    @Test
+    fun `shutdown con 409 conflict cierra el dialogo y emite snackbar de error`() = runTest {
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") ->
+                        respond(machinesJson(), HttpStatusCode.OK, jsonHeaders())
+                    else ->
+                        respond(
+                            """{"error":{"code":"conflict","message":"el host no coincide con el fingerprint fijado; máquina marcada no_fiable"}}""",
+                            HttpStatusCode.Conflict,
+                            jsonHeaders(),
+                        )
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+        val gestionada = managedMachine(id = 1).copy(status = MachineStatus.ONLINE)
+        vm.openShutdownDialog(gestionada)
+
+        vm.shutdown(gestionada)
+        runCurrent()
+
+        // UX-DR7: el 409 (fingerprint_mismatch → no_fiable) cierra el diálogo y
+        // va al snackbar; el reintento es a nivel de fila, no de diálogo.
+        assertThat(vm.dialog.value).isNull()
+        val msg = vm.consumeActionMessage()
+        assertThat(msg).isNotNull()
+        assertThat(msg!!.isError).isTrue()
+        assertThat(msg.text).contains("fingerprint")
+    }
+
+    @Test
+    fun `tras una accion exitosa se refresca la lista con GET machines`() = runTest {
+        var enrolledNow = false
+        val getLog = mutableListOf<String>()
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { request ->
+                when {
+                    request.url.toString().endsWith("/machines") -> {
+                        getLog.add(request.url.toString())
+                        // Tras el alta, el BE devuelve la máquina gestionada
+                        // (FR-2: la confirmación del cambio llega del estado).
+                        val json = if (enrolledNow) {
+                            """{"machines":[{"id":1,"name":"Gestionada","ip":"192.168.1.20","mac":"AA:BB:CC:DD:EE:02","hostname":"gestionada","status":"offline","managed":true}]}"""
+                        } else {
+                            machinesJson()
+                        }
+                        respond(json, HttpStatusCode.OK, jsonHeaders())
+                    }
+                    else -> {
+                        enrolledNow = true
+                        respond(actionJson, HttpStatusCode.OK, jsonHeaders())
+                    }
+                }
+            },
+        )
+        val vm = newViewModel(api)
+        vm.start()
+        runCurrent()
+        assertThat(getLog).hasSize(1)
+
+        val nueva = Machine(
+            id = 9, name = "Nueva", ip = "192.168.1.30", mac = null,
+            hostname = "nueva", status = MachineStatus.OFFLINE, managed = false,
+        )
+        vm.enroll(nueva, "maria", "s3cr3t")
+        runCurrent()
+
+        // FR-2: el control provoca un GET /machines de refresco…
+        assertThat(getLog).hasSize(2)
+        // …y la lista refleja el estado nuevo del BE (managed=true).
+        assertThat(vm.uiState.value.machines.single().managed).isTrue()
+    }
 }
 

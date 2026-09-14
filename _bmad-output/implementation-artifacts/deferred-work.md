@@ -13,3 +13,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-6-primer-arranque-y-configuracion-de-conexion.md`
   summary: KeystoreSecretStore (producción, en cada arranque) sin ninguna ejecución automatizada: Robolectric no simula AndroidKeyStore.
   evidence: verification-gap 1.6: todos los tests usan dobles en memoria; la construcción de MasterKey/EncryptedSharedPreferences lanza AndroidKeyStore not found en JVM. Requiere verificación en dispositivo (primer arranque real + re-arranque con sesión persistida) o androidTest instrumentado.
+- source_spec: `_bmad-output/implementation-artifacts/spec-2-epic-2-enciende-y-apaga.md`
+  summary: El test Robolectric de no-persistencia de la password del alta solo aserta el cierre del diálogo y el body del POST; el almacén real (Keystore/EncryptedSharedPreferences) no se ejercita.
+  evidence: Revisión del epic 2 (blind-hunter): un fallo de persistencia de la password en SecureSettingsRepository no se detectaría en JVM; requiere androidTest instrumentado o verificación en dispositivo (mismo deferred que KeystoreSecretStore de 1.6).
+- source_spec: `_bmad-output/implementation-artifacts/spec-2-epic-2-enciende-y-apaga.md`
+  summary: send_wol envía solo al broadcast global 255.255.255.255:9 sin fallback al broadcast dirigido de la subred física; redes que filtran el global harían que el wake "funcione" en falso.
+  evidence: Revisión del epic 2 (blind-hunter): la nota de diseño 2.2 preveía el broadcast dirigido "si es determinable" y no se implementó; verificación en LAN real al desplegar.
+- source_spec: `_bmad-output/implementation-artifacts/spec-2-epic-2-enciende-y-apaga.md`
+  summary: Sin vía de recovery para no_fiable: re-enroll devuelve 409 y no hay CLI/API para re-fijar el fingerprint ni borrar la marca.
+  evidence: Revisión del epic 2 (blind-hunter): el estado lo crea el propio sistema (AD-2) y su única salida es la edición manual de la DB; requiere diseño (CLI re-enroll o UI de re-alta) fuera del AC.

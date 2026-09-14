@@ -102,8 +102,9 @@ async def test_cli_uses_db_path_from_settings(tmp_path, monkeypatch, capsys):
 
 
 async def test_init_db_migrates_legacy_1_2_db(tmp_path):
-    """Migración 1.2→1.4 (verification-gap): una DB de la story 1.2 (sin
-    columnas de estado ni tabla tokens) se evolve en init_db sin romper filas."""
+    """Migración 1.2→1.4→epic 2 (verification-gap): una DB de la story 1.2 (sin
+    columnas de estado ni tabla tokens) se evolve en init_db sin romper filas,
+    y el epic 2 añade fingerprint/remote_user + tablas keys/activity_log."""
     import sqlite3
 
     legacy = tmp_path / "legacy.db"
@@ -128,12 +129,17 @@ async def test_init_db_migrates_legacy_1_2_db(tmp_path):
 
     rows = await db._conn.execute_fetchall("PRAGMA table_info(machines);")
     cols = {r[1] for r in rows}
-    assert {"state", "status_checked_at"} <= cols
+    assert {"state", "status_checked_at", "fingerprint", "remote_user"} <= cols
 
     tok_rows = await db._conn.execute_fetchall(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='tokens';"
     )
     assert len(tok_rows) == 1
+    for table in ("keys", "activity_log"):
+        trows = await db._conn.execute_fetchall(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (table,)
+        )
+        assert len(trows) == 1, f"tabla {table} ausente tras migrar"
 
     machines = await db.list_machines()
     assert len(machines) == 1
@@ -141,10 +147,25 @@ async def test_init_db_migrates_legacy_1_2_db(tmp_path):
     assert machines[0].mac == "aa:bb:cc:dd:ee:10"
     assert machines[0].hostname == "pc-maria"
     assert machines[0].state == "offline"
+    assert machines[0].fingerprint is None
+    assert machines[0].remote_user is None
 
     token = "d" * 64
     await db.create_token("post-migra", sha256_hex_lower(token))
     await db.commit()
     assert await db.token_exists(sha256_hex_lower(token)) is True
+
+    # El epic 2 funciona sobre la DB migrada: alta + registro de actividad.
+    await db.set_managed(1, "SHA256:abcd", "maria")
+    await db.record_key(1, "ed25519", "SHA256:abcd")
+    await db.record_activity("api", "tok", 1, "192.168.1.10", "enroll", "ok")
+    await db.commit()
+    m = await db.get_by_id(1)
+    assert m is not None and m.fingerprint == "SHA256:abcd"
+    assert await db.key_count(1) == 1
+    entries = await db.list_activity(limit=5)
+    assert len(entries) == 1
+    assert entries[0].operation == "enroll"
+    assert await db.activity_stats() == [("enroll", "ok", 1)]
 
     await db.close()

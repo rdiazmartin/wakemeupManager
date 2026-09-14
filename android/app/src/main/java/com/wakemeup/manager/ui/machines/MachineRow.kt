@@ -38,19 +38,20 @@ import com.wakemeup.manager.ui.theme.WarningAmber
  * Fila de máquina conforme UX-DR2/DR5: punto 10dp + texto meta (nunca solo color),
  * nombre en título, IP/MAC monoespaciadas, acciones inline según estado.
  *
- * Las acciones se RENDERIZAN conforme al estado pero no tienen lógica en 1.5
- * (decisión de usuario: lógica en el Epic 2); TalkBack las anuncia como presentes
- * y el tap muestra un snackbar informativo vía [onActionTap].
+ * Las acciones (epic 2) son reales: [onEnroll] para descubiertas, [onWake] para
+ * gestionadas offline y [onShutdown] para gestionadas online; la pantalla decide
+ * el diálogo (apagado siempre); `no_fiable` se queda sin acciones (UX-DR5).
  */
 @Composable
 fun MachineRow(
     machine: Machine,
-    onActionTap: (Machine) -> Unit,
+    onEnroll: (Machine) -> Unit,
+    onWake: (Machine) -> Unit,
+    onShutdown: (Machine) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val offline = machine.status == MachineStatus.OFFLINE
     val noFiable = machine.status == MachineStatus.NO_FIABLE
-    val online = machine.status == MachineStatus.ONLINE
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -116,20 +117,20 @@ fun MachineRow(
                         label = R.string.machine_action_enroll,
                         icon = Icons.Outlined.Add,
                         tonal = true,
-                        onTap = { onActionTap(machine) },
+                        onTap = { onEnroll(machine) },
                     )
                     // Gestión de estado: offline → Encender; gestionada/online → Apagar.
                     offline -> ActionButton(
                         label = R.string.machine_action_wake,
                         icon = Icons.Outlined.PowerSettingsNew,
                         tonal = true,
-                        onTap = { onActionTap(machine) },
+                        onTap = { onWake(machine) },
                     )
                     else -> ActionButton(
                         label = R.string.machine_action_shutdown,
                         icon = Icons.Outlined.PowerSettingsNew,
                         tonal = false,
-                        onTap = { onActionTap(machine) },
+                        onTap = { onShutdown(machine) },
                     )
                 }
             }

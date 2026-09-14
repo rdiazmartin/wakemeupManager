@@ -19,7 +19,27 @@
     <string name="machine_action_enroll">Dar de alta</string>
     <string name="machine_action_wake">Encender</string>
     <string name="machine_action_shutdown">Apagar</string>
-    <string name="machine_action_noop_info">Disponible en la próxima versión</string>
+
+    <!-- Diálogo de apagado (UX-DR3) -->
+    <string name="shutdown_dialog_title">¿Apagar la máquina?</string>
+    <string name="shutdown_dialog_body">¿Apagar %1$s? No podrás acceder a ella hasta que se encienda de nuevo. Si no responde, quizá esté sin SSH activo.</string>
+    <string name="shutdown_dialog_confirm">Apagar</string>
+    <string name="shutdown_dialog_cancel">Cancelar</string>
+
+    <!-- Diálogo de alta (UX-DR6) -->
+    <string name="enroll_dialog_title">Dar de alta %1$s</string>
+    <string name="enroll_dialog_user_label">Usuario</string>
+    <string name="enroll_dialog_password_label">Password</string>
+    <string name="enroll_dialog_show_password">Mostrar password</string>
+    <string name="enroll_dialog_hide_password">Ocultar password</string>
+    <string name="enroll_dialog_once_hint">La password se usa una sola vez y no se guarda.</string>
+    <string name="enroll_dialog_confirm">Dar de alta</string>
+    <string name="enroll_dialog_cancel">Cancelar</string>
+
+    <!-- Snackbars de acción (UX-DR7) -->
+    <string name="action_message_alta_ok">Máquina dada de alta</string>
+    <string name="action_message_wake_ok">Encendido enviado</string>
+    <string name="action_message_shutdown_ok">Máquina apagada</string>
 
     <!-- Contenido de fila -->
     <string name="machine_ip_label">IP</string>

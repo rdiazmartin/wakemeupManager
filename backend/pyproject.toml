@@ -13,6 +13,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "aiosqlite>=0.22",
     # ipaddress: stdlib (redes del descubrimiento; sin dependencia extra)
+    "asyncssh>=2.24.0",
 ]
 
 [project.scripts]

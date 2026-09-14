@@ -87,6 +87,8 @@ class StatusService:
                     hostname=machine.hostname,
                     state="offline",
                     status_checked_at=machine.status_checked_at,
+                    fingerprint=machine.fingerprint,
+                    remote_user=machine.remote_user,
                 )
             result.append(machine)
         return result

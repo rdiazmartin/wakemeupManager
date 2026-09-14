@@ -1,12 +1,16 @@
-"""CLI del BE: alta/revocación de tokens de dispositivo (FR-10, AD-6).
+"""CLI del BE: alta/revocación de tokens de dispositivo (FR-10, AD-6) y
+consulta del registro de actividad (FR-11, story 2.5).
 
 Los tokens se muestran UNA sola vez; en la BD solo queda el hash SHA-256 de
 la representación hex-lower (la CLI hashea la misma representación que la API
-y el CLI de revocación). Uso:
+y el CLI de revocación). Los logs de actividad nunca contienen passwords.
+Uso:
 
     wakemeup-cli token create <nombre>
     wakemeup-cli token revoke <nombre|token-hex-64>
     wakemeup-cli token list
+    wakemeup-cli activity list [--limit N]
+    wakemeup-cli activity stat
 """
 from __future__ import annotations
 
@@ -42,12 +46,33 @@ async def _async_main(argv: list[str] | None = None) -> int:
 
     p_create_tokens.add_parser("list", help="listar tokens registrados")
 
+    p_activity = sub.add_parser("activity", help="registro de actividad (2.5)")
+    p_act_list = p_activity.add_subparsers(dest="activity_action", required=True)
+
+    p_list = p_act_list.add_parser("list", help="mostrar las últimas entradas de actividad")
+    p_list.add_argument("--limit", type=int, default=20, help="nº de entradas (default 20)")
+
+    p_act_list.add_parser("stat", help="resumen agregado por operación y resultado")
+
     args = parser.parse_args(argv)
 
     db = _build_db()
     await db.init_db()
     try:
-        if args.command == "token":
+        if args.command == "activity":
+            try:
+                if args.activity_action == "list":
+                    for e in await db.list_activity(limit=args.limit):
+                        maquina = e.machine_ip or e.machine_id or "-"
+                        print(f"{e.timestamp}  {e.channel:4s}  token={e.token[:12]}  "
+                              f"máquina={maquina}  {e.operation}={e.result}")
+                elif args.activity_action == "stat":
+                    for operation, result, count in await db.activity_stats():
+                        print(f"{operation}\t{result}\t{count}")
+            except Exception as exc:
+                logging.getLogger("wakemeup.cli").error("fallo en la operación CLI: %r", exc)
+                return 1
+        elif args.command == "token":
             try:
                 if args.token_action == "create":
                     token = new_device_token()

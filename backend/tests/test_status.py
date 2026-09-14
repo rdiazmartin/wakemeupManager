@@ -288,3 +288,27 @@ async def test_check_cycle_survives_failing_check(db):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+@pytest.mark.asyncio
+async def test_check_all_never_overwrites_no_fiable_state(db):
+    """Regresión epic 2: una máquina `no_fiable` (fingerprint mismatch, AD-2/AD-10)
+    SOBREVIVE a los barridos del loop de estado — set_status nunca la machaca
+    con online/offline (guard `state != 'no_fiable'` en _UPSERT_STATUS)."""
+    svc = StatusService(net=FakeNet(alive={"192.168.1.10"}), db=db, scan=ScanSettings(ttl_seconds=300))
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    await db.begin()
+    await db.set_managed(1, "SHA256:abcd", "maria")  # deja state='no_fiable'
+    await db.commit()
+    assert (await db.get_status("192.168.1.10"))[0] == "no_fiable"
+
+    # Barrido con la máquina viva (y otro con la máquina muerta): el estado
+    # persistido no_fiable debe conservarse en ambos casos.
+    await svc.check_all()
+    state, _ = await db.get_status("192.168.1.10")
+    assert state == "no_fiable"
+
+    svc2 = StatusService(net=FakeNet(set()), db=db, scan=ScanSettings(ttl_seconds=300))
+    await svc2.check_all()
+    state, _ = await db.get_status("192.168.1.10")
+    assert state == "no_fiable"

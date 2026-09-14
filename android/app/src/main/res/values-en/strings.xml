@@ -19,7 +19,27 @@
     <string name="machine_action_enroll">Enroll</string>
     <string name="machine_action_wake">Wake</string>
     <string name="machine_action_shutdown">Shut down</string>
-    <string name="machine_action_noop_info">Available in a future version</string>
+
+    <!-- Shutdown dialog (UX-DR3) -->
+    <string name="shutdown_dialog_title">Turn off this machine?</string>
+    <string name="shutdown_dialog_body">Turn off %1$s? You won\'t be able to reach it until it is powered on again. If it doesn\'t respond, SSH may be off.</string>
+    <string name="shutdown_dialog_confirm">Turn off</string>
+    <string name="shutdown_dialog_cancel">Cancel</string>
+
+    <!-- Enrollment dialog (UX-DR6) -->
+    <string name="enroll_dialog_title">Enroll %1$s</string>
+    <string name="enroll_dialog_user_label">Username</string>
+    <string name="enroll_dialog_password_label">Password</string>
+    <string name="enroll_dialog_show_password">Show password</string>
+    <string name="enroll_dialog_hide_password">Hide password</string>
+    <string name="enroll_dialog_once_hint">The password is used once and is not saved.</string>
+    <string name="enroll_dialog_confirm">Enroll</string>
+    <string name="enroll_dialog_cancel">Cancel</string>
+
+    <!-- Action snackbars (UX-DR7) -->
+    <string name="action_message_alta_ok">Machine enrolled</string>
+    <string name="action_message_wake_ok">Wake sent</string>
+    <string name="action_message_shutdown_ok">Machine turned off</string>
 
     <!-- Row content -->
     <string name="machine_ip_label">IP</string>

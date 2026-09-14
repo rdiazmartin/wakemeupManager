@@ -5,6 +5,7 @@ Cubren la matriz del spec: host activo, host apagado, IP propia excluida
 rango no-LAN excluido y degradación a ARP-only cuando el ping no-root falla.
 """
 import asyncio
+import socket
 
 import pytest
 
@@ -309,3 +310,129 @@ async def test_wol_interface_degrades_on_oserror_not_filenotfound(monkeypatch):
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
     assert await Net().wol_interface() is None
+
+
+# --- WOL: send_wol (epic 2, AC 2.2 / FR-4) ---
+
+
+def test_normalize_mac_variants():
+    """12 hex o 17 con `:`/`-` → 6 bytes; separadores mixtos también valen."""
+    assert Net.normalize_mac("AA:BB:CC:DD:EE:FF") == b"\xaa\xbb\xcc\xdd\xee\xff"
+    assert Net.normalize_mac("aabbccddeeff") == b"\xaa\xbb\xcc\xdd\xee\xff"
+    assert Net.normalize_mac("AA-BB-CC-DD-EE-FF") == b"\xaa\xbb\xcc\xdd\xee\xff"
+
+
+@pytest.mark.parametrize(
+    "mac",
+    ["", "zz:bb:cc:dd:ee:ff", "aa:bb:cc", "aabbccddeff", "aa:bb:cc:dd:ee:ff:11"],
+)
+def test_normalize_mac_invalid(mac):
+    with pytest.raises(ValueError):
+        Net.normalize_mac(mac)
+
+
+def test_normalize_mac_rejects_multicast_and_zero():
+    with pytest.raises(ValueError):
+        Net.normalize_mac("01:00:00:00:00:00")  # multicast (bit LSB)
+    with pytest.raises(ValueError):
+        Net.normalize_mac("00:00:00:00:00:00")  # cero
+
+
+def test_magic_packet_structure():
+    """6×0xFF + MAC×16 como bytes (spec 2.2)."""
+    mac = Net.normalize_mac("aa:bb:cc:dd:ee:01")
+    magic = b"\xff" * 6 + mac * 16
+    assert magic == b"\xff" * 6 + b"\xaa\xbb\xcc\xdd\xee\x01" * 16
+    assert len(magic) == 6 + 6 * 16
+
+
+@pytest.mark.asyncio
+async def test_send_wol_sends_udp_broadcast(monkeypatch):
+    """Un único datagrama UDP al broadcast con SO_BROADCAST (puerto 9)."""
+    sent: list[tuple[bytes, tuple[str, int]]] = []
+    setopts: list[tuple[int, int]] = []
+
+    class FakeSock:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def setsockopt(self, level, opt, value):
+            setopts.append((level, opt))
+            if opt == socket.SO_BINDTODEVICE:
+                raise OSError("sin CAP_NET_RAW")  # degradación del bind
+
+        def sendto(self, data, addr):
+            sent.append((data, addr))
+
+    monkeypatch.setattr("socket.socket", lambda *a, **kw: FakeSock())
+    net = Net()
+
+    class EthNet(net.__class__):
+        async def wol_interface(self):
+            return "eth0"
+
+    iface = await EthNet().send_wol("aa:bb:cc:dd:ee:11")
+    assert iface == "eth0"
+    assert len(sent) == 1
+    data, addr = sent[0]
+    assert data == b"\xff" * 6 + b"\xaa\xbb\xcc\xdd\xee\x11" * 16
+    assert addr == ("255.255.255.255", 9)
+    assert (socket.SOL_SOCKET, socket.SO_BROADCAST) in setopts
+
+
+@pytest.mark.asyncio
+async def test_send_wol_falls_back_to_port_7(monkeypatch):
+    """Si falla el puerto 9, fallback al 7 (nota de implementación)."""
+    sent: list[tuple[bytes, tuple[str, int]]] = []
+
+    class FakeSock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def setsockopt(self, level, opt, value):
+            pass
+
+        def sendto(self, data, addr):
+            if addr[1] == 9:
+                raise OSError("EACCES broadcast")
+            sent.append((data, addr))
+
+    monkeypatch.setattr("socket.socket", lambda *a, **kw: FakeSock())
+    net = Net()
+
+    class EthNet(net.__class__):
+        async def wol_interface(self):
+            return "eth0"
+
+    iface = await EthNet().send_wol("aa:bb:cc:dd:ee:11")
+    assert iface == "eth0"
+    assert sent and sent[0][1][1] == 7
+
+
+@pytest.mark.asyncio
+async def test_send_wol_without_ethernet_raises_runtime_error(monkeypatch):
+    """Sin interfaz Ethernet emisora → RuntimeError (el servicio degrada a éxito)."""
+    net = Net()
+
+    class NoEth(net.__class__):
+        async def wol_interface(self):
+            return None
+
+    with pytest.raises(RuntimeError):
+        await NoEth().send_wol("aa:bb:cc:dd:ee:11")
+
+
+@pytest.mark.asyncio
+async def test_send_wol_invalid_mac_raises_value_error(monkeypatch):
+    net = Net()
+    with pytest.raises(ValueError):
+        await net.send_wol("zz:zz:zz:zz:zz:zz")

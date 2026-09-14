@@ -2,8 +2,12 @@
 
 Prefijo `/api/v1` con healthcheck exento (decisión 1.2), auth Bearer por token
 de dispositivo con backoff (FR-10/AD-6), inventario (AD-10) y escaneo forzado
-(AD-3). El lifespan conecta los loops periódicos de discovery y status al
-ciclo de vida de la app, inicializa la DB y los detiene al apagar.
+(AD-3). Epic 2 (ciclo de control): alta asyncssh con password de un solo uso
+(2.1), wake WOL (2.2) y shutdown con verificación de fingerprint (2.3), todos
+con registro de actividad (2.5). El API nunca ejecuta acciones directamente:
+delega en los servicios (AD-4). El lifespan conecta los loops periódicos de
+discovery y status al ciclo de vida de la app, inicializa la DB y los detiene
+al apagar.
 
 Los servicios se exponen como atributos de `app` (sustituibles en tests sin
 abrir la DB real); el lifespan los construye desde la configuración.
@@ -19,34 +23,47 @@ from dataclasses import asdict
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, StringConstraints
+from typing import Annotated
 
 from wakemeup import __version__
 from wakemeup.adapters.db import Db
 from wakemeup.adapters.net import Net
+from wakemeup.adapters.ssh import Ssh
 from wakemeup.config import Settings
 from wakemeup.core.models import MachineDTO
+from wakemeup.services.activity import ActivityService, CHANNEL_API
 from wakemeup.services.auth import AuthService, sha256_hex_lower
 from wakemeup.services.discovery import DiscoveryService
+from wakemeup.services.enrollment import EnrollmentError, EnrollmentService
+from wakemeup.services.shutdown import ShutdownError, ShutdownService
 from wakemeup.services.status import StatusService
+from wakemeup.services.wake import WakeError, WakeService
 
 logger = logging.getLogger(__name__)
 
 
-def _build_services() -> tuple[Db, Net, DiscoveryService, StatusService, AuthService]:
+def _build_services() -> tuple:
     """Grafo de servicios desde la configuración (sin abrir la DB todavía)."""
     settings = Settings()
     db = Db(settings.db.path)
     net = Net()
+    activity = ActivityService(db=db)
+    ssh = Ssh(settings=settings.ssh)
     return (
         db,
         net,
         DiscoveryService(net=net, db=db, scan=settings.scan),
         StatusService(net=net, db=db, scan=settings.scan),
         AuthService(db=db, settings=settings.auth),
+        EnrollmentService(db=db, net=net, ssh=ssh, activity=activity),
+        WakeService(db=db, net=net, activity=activity),
+        ShutdownService(db=db, ssh=ssh, activity=activity, shutdown=settings.shutdown),
+        ActivityService(db=db),
     )
 
 
-_db, _net, _discovery, _status, _auth = _build_services()
+_db, _net, _discovery, _status, _auth, _enrollment, _wake, _shutdown_svc, _activity = _build_services()
 
 
 @asynccontextmanager
@@ -79,6 +96,10 @@ app.net = _net
 app.discovery = _discovery
 app.status = _status
 app.auth = _auth
+app.enrollment = _enrollment
+app.wake = _wake
+app.shutdown = _shutdown_svc
+app.activity = _activity
 
 api = APIRouter(prefix="/api/v1")
 
@@ -172,7 +193,7 @@ async def status_head() -> None:
 
 @api.get("/machines")
 async def machines() -> dict:
-    """Listado con DTO AD-10 completo; `managed=false` hasta el alta (Epic 2)."""
+    """Listado con DTO AD-10 completo; `managed` se deriva de `fingerprint IS NOT NULL`."""
     rows = await app.status.list_with_status()
     machines = [
         asdict(
@@ -183,12 +204,75 @@ async def machines() -> dict:
                 mac=m.mac,
                 hostname=m.hostname,
                 status=m.state,
-                managed=False,
+                managed=m.fingerprint is not None,
             )
         )
         for m in rows
     ]
     return {"machines": machines}
+
+
+class _EnrollBody(BaseModel):
+    """Cuerpo de `POST /machines/{id}/enroll` (2.1): usuario + password de un solo uso.
+
+    La password vive solo en memoria del proceso (FR-6/AD-5): nunca en disco,
+    logs, argv, entorno ni cuerpo de respuesta; se descarta también si falla.
+    `strip_whitespace` + límites acotados: credenciales blank/oversize → 422
+    antes de llegar al SSH.
+    """
+
+    usuario: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]
+    password: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]
+
+
+@api.post("/machines/{machine_id}/enroll")
+async def enroll(machine_id: int, body: _EnrollBody, request: Request) -> JSONResponse:
+    """Alta de máquina descubierta (AC 2.1): SSH + fingerprint + authorized_keys.
+
+    Errores acotados (envelope AD-1): 401 password fallida, 404 inexistente,
+    409 ya gestionada, 502 fallo SSH.
+    """
+    token = _request_token(request)
+    try:
+        result = await app.enrollment.enroll(
+            machine_id, body.usuario, body.password, channel=CHANNEL_API, token=token
+        )
+    except EnrollmentError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    return JSONResponse(status_code=200, content=result)
+
+
+@api.post("/machines/{machine_id}/wake")
+async def wake(machine_id: int, request: Request) -> JSONResponse:
+    """Encendido por WOL (AC 2.2): un único magic packet; siempre éxito."""
+    token = _request_token(request)
+    try:
+        result = await app.wake.wake(machine_id, channel=CHANNEL_API, token=token)
+    except WakeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    return JSONResponse(status_code=200, content=result)
+
+
+@api.post("/machines/{machine_id}/shutdown")
+async def shutdown(machine_id: int, request: Request) -> JSONResponse:
+    """Apagado por SSH (AC 2.3): verifica fingerprint; si no coincide → no_fiable."""
+    token = _request_token(request)
+    try:
+        result = await app.shutdown.shutdown(machine_id, channel=CHANNEL_API, token=token)
+    except ShutdownError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    return JSONResponse(status_code=200, content=result)
+
+
+def _request_token(request: Request) -> str:
+    """Digest del token Bearer presentado (registro de actividad, AD-6).
+
+    En el log se guarda el hash hex-lower, nunca el token plano (FR-11).
+    """
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return sha256_hex_lower(header[7:].strip())
+    return "-"
 
 
 @api.post("/scan")

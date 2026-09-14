@@ -4,6 +4,10 @@ Inventario de máquinas con upsert no destructivo (nunca borra): un host que
 deja de responder permanece en la tabla; el borrado solo existe vía DELETE
 explícito (AD-3), fuera del alcance de la story 1.2. Tokens de dispositivo
 (1.4): solo el hash SHA-256 de la representación hex-lower (AD-6).
+
+Epic 2: columnas `fingerprint`/`remote_user` (alta, 2.1), tabla `keys`
+(fingerprint + authorized_keys instalado) y tabla `activity_log` (2.5:
+timestamp, canal, token, máquina, resultado — nunca passwords).
 """
 from __future__ import annotations
 
@@ -11,7 +15,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from wakemeup.core.models import Machine, Token
+from wakemeup.core.models import ActivityEntry, Machine, Token
 
 _DEFAULT_DB_PATH = Path("wakemeup.db")
 
@@ -23,6 +27,8 @@ CREATE TABLE IF NOT EXISTS machines (
     hostname TEXT,
     state TEXT NOT NULL DEFAULT 'offline',
     status_checked_at TEXT,
+    fingerprint TEXT,
+    remote_user TEXT,
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tokens (
@@ -32,6 +38,24 @@ CREATE TABLE IF NOT EXISTS tokens (
     created_at TEXT NOT NULL,
     revoked_at TEXT
 );
+CREATE TABLE IF NOT EXISTS keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    machine_id INTEGER NOT NULL UNIQUE REFERENCES machines(id),
+    algorithm TEXT NOT NULL,
+    fingerprint_sha256 TEXT NOT NULL,
+    installed TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS activity_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    token TEXT NOT NULL,
+    machine_id INTEGER REFERENCES machines(id),
+    machine_ip TEXT,
+    operation TEXT NOT NULL,
+    result TEXT NOT NULL
+);
 """
 
 # Migración de esquema para DBs creadas por stories anteriores: ALTER/creación
@@ -39,6 +63,8 @@ CREATE TABLE IF NOT EXISTS tokens (
 _COLUMN_MIGRATIONS = {
     "state": "ALTER TABLE machines ADD COLUMN state TEXT NOT NULL DEFAULT 'offline';",
     "status_checked_at": "ALTER TABLE machines ADD COLUMN status_checked_at TEXT;",
+    "fingerprint": "ALTER TABLE machines ADD COLUMN fingerprint TEXT;",
+    "remote_user": "ALTER TABLE machines ADD COLUMN remote_user TEXT;",
 }
 
 _UPSERT = """
@@ -52,12 +78,47 @@ ON CONFLICT(ip) DO UPDATE SET
 
 _UPSERT_STATUS = """
 UPDATE machines SET state = ?, status_checked_at = ?
-WHERE ip = ?;
+WHERE ip = ? AND state != 'no_fiable';
 """
 
-_LIST = "SELECT id, ip, mac, hostname, state, status_checked_at FROM machines ORDER BY id;"
+_LIST = (
+    "SELECT id, ip, mac, hostname, state, status_checked_at, fingerprint, remote_user "
+    "FROM machines ORDER BY id;"
+)
 
 _GET_STATUS = "SELECT state, status_checked_at FROM machines WHERE ip = ?;"
+
+_GET_BY_ID = (
+    "SELECT id, ip, mac, hostname, state, status_checked_at, fingerprint, remote_user "
+    "FROM machines WHERE id = ?;"
+)
+
+_SET_MANAGED = (
+    "UPDATE machines SET fingerprint = ?, remote_user = ?, state = 'no_fiable', updated_at = ? WHERE id = ?;"
+)
+
+_SET_NO_FIABLE = "UPDATE machines SET state = 'no_fiable', updated_at = ? WHERE id = ?;"
+
+_SET_STATE = "UPDATE machines SET state = ?, updated_at = ? WHERE id = ?;"
+
+_INSERT_KEY = (
+    "INSERT INTO keys (machine_id, algorithm, fingerprint_sha256, installed, created_at) "
+    "VALUES (?, ?, ?, ?, ?);"
+)
+
+_KEY_COUNT = "SELECT COUNT(*) FROM keys WHERE machine_id = ?;"
+
+_INSERT_ACTIVITY = (
+    "INSERT INTO activity_log (timestamp, channel, token, machine_id, machine_ip, operation, result) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?);"
+)
+
+_LIST_ACTIVITY = (
+    "SELECT id, timestamp, channel, token, machine_id, machine_ip, operation, result "
+    "FROM activity_log ORDER BY id DESC LIMIT ?;"
+)
+
+_ACTIVITY_STAT = "SELECT operation, result, COUNT(*) FROM activity_log GROUP BY operation, result ORDER BY operation;"
 
 _INSERT_TOKEN = "INSERT INTO tokens (device_name, token_sha256, created_at, revoked_at) VALUES (?, ?, ?, ?);"
 
@@ -87,17 +148,18 @@ class Db:
         await self._conn.commit()
 
     async def _migrate(self) -> None:
-        """Evoluciona DBs creadas por stories anteriores (1.2/1.3 → 1.4).
+        """Evoluciona DBs creadas por stories anteriores (1.2/1.3/1.4 → epic 2).
 
-        Añade solo las columnas de estado ausentes y crea la tabla `tokens`
-        (ausente en DBs 1.2/1.3). Consulta `PRAGMA table_info` en lugar de
-        tragar cualquier error de ALTER: un fallo real (DB bloqueada, disco
-        lleno...) se propaga.
+        Añade las columnas ausentes a `machines` y garantiza las tablas
+        `tokens`/`keys`/`activity_log` re-ejecutando el `_SCHEMA` canónico
+        (CREATE TABLE IF NOT EXISTS, fuente única de verdad). Consulta
+        `PRAGMA table_info` en lugar de tragar cualquier error de ALTER: un
+        fallo real (DB bloqueada, disco lleno...) se propaga.
         """
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
         await self._migrate_machines()
-        await self._migrate_tokens()
+        await self._conn.executescript(_SCHEMA)
 
     async def _migrate_machines(self) -> None:
         if self._conn is None:
@@ -107,16 +169,6 @@ class Db:
         for column, ddl in _COLUMN_MIGRATIONS.items():
             if column not in existing:
                 await self._conn.execute(ddl)
-
-    async def _migrate_tokens(self) -> None:
-        if self._conn is None:
-            raise RuntimeError("db no inicializado: llamar init_db() primero")
-        await self._conn.executescript("CREATE TABLE IF NOT EXISTS tokens ("
-                                       "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                                       "device_name TEXT NOT NULL UNIQUE,"
-                                       "token_sha256 TEXT NOT NULL UNIQUE,"
-                                       "created_at TEXT NOT NULL,"
-                                       "revoked_at TEXT);")
 
     async def begin(self) -> None:
         """Inicia una transacción explícita (los upserts se agrupan en _run)."""
@@ -156,9 +208,113 @@ class Db:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
         rows = await self._conn.execute_fetchall(_LIST)
         return [
-            Machine(id=r[0], ip=r[1], mac=r[2], hostname=r[3], state=r[4], status_checked_at=r[5])
+            Machine(
+                id=r[0], ip=r[1], mac=r[2], hostname=r[3], state=r[4],
+                status_checked_at=r[5], fingerprint=r[6], remote_user=r[7],
+            )
             for r in rows
         ]
+
+    async def get_by_id(self, machine_id: int) -> Machine | None:
+        """Máquina del inventario por id; `None` si no existe."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        rows = await self._conn.execute_fetchall(_GET_BY_ID, (machine_id,))
+        if not rows:
+            return None
+        r = rows[0]
+        return Machine(
+            id=r[0], ip=r[1], mac=r[2], hostname=r[3], state=r[4],
+            status_checked_at=r[5], fingerprint=r[6], remote_user=r[7],
+        )
+
+    async def set_managed(self, machine_id: int, fingerprint: str, remote_user: str) -> None:
+        """Fija el fingerprint y el usuario remoto tras un alta correcta (2.1).
+
+        El estado se marca `no_fiable` hasta que un apagado verifique el
+        fingerprint (AD-2): la máquina queda gestionada pero aún sin confiar.
+        Idempotente: el alta sobre una máquina ya gestionada se rechaza en el
+        servicio (409), nunca vuelve a instalar la clave aquí.
+        """
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        await self._conn.execute(
+            _SET_MANAGED, (fingerprint, remote_user, _now_iso(), machine_id)
+        )
+
+    async def set_no_fiable(self, machine_id: int) -> None:
+        """Marca la máquina `no_fiable` (fingerprint actual != fijado, AD-2/AD-10)."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        await self._conn.execute(_SET_NO_FIABLE, (_now_iso(), machine_id))
+
+    async def set_state(self, machine_id: int, state: str) -> None:
+        """Escribe el estado persistido de la máquina (sin TTL; epic 2)."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        await self._conn.execute(_SET_STATE, (state, _now_iso(), machine_id))
+
+    async def record_key(self, machine_id: int, algorithm: str, fingerprint_sha256: str) -> None:
+        """Registra el par de claves + fingerprint instalado en el alta (tabla `keys`).
+
+        `installed == 'authorized_keys'` indica que la clave pública del BE se
+        copió de forma idempotente a `authorized_keys` del usuario remoto.
+        """
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        await self._conn.execute(
+            _INSERT_KEY,
+            (machine_id, algorithm, fingerprint_sha256, "authorized_keys", _now_iso()),
+        )
+
+    async def key_count(self, machine_id: int) -> int:
+        """Nº de registros en `keys` para la máquina (0 = nunca dada de alta)."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        rows = await self._conn.execute_fetchall(_KEY_COUNT, (machine_id,))
+        return rows[0][0] if rows else 0
+
+    async def record_activity(
+        self,
+        channel: str,
+        token: str,
+        machine_id: int | None,
+        machine_ip: str | None,
+        operation: str,
+        result: str,
+    ) -> None:
+        """Registra una entrada de actividad (FR-11, story 2.5).
+
+        NUNCA passwords (la password del alta nunca llega aquí); el token se
+        registra como identificación del dispositivo (no es secreto en el
+        registro porque viaja en cada petición; los logs no lo exponen fuera).
+        """
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        await self._conn.execute(
+            _INSERT_ACTIVITY,
+            (_now_iso(), channel, token, machine_id, machine_ip, operation, result),
+        )
+
+    async def list_activity(self, limit: int = 20) -> list[ActivityEntry]:
+        """Últimas entradas de actividad (más recientes primero), `limit` tope."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        rows = await self._conn.execute_fetchall(_LIST_ACTIVITY, (max(limit, 1),))
+        return [
+            ActivityEntry(
+                id=r[0], timestamp=r[1], channel=r[2], token=r[3],
+                machine_id=r[4], machine_ip=r[5], operation=r[6], result=r[7],
+            )
+            for r in rows
+        ]
+
+    async def activity_stats(self) -> list[tuple[str, str, int]]:
+        """Agregados por `(operation, result)` para `wakemeup-cli activity stat`."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        rows = await self._conn.execute_fetchall(_ACTIVITY_STAT)
+        return [(r[0], r[1], r[2]) for r in rows]
 
     async def get_status(self, ip: str) -> tuple[str, str | None] | None:
         """Estado persistido de la máquina: `(state, status_checked_at)` o `None` si no existe."""
@@ -172,8 +328,10 @@ class Db:
     async def set_status(self, ip: str, state: str) -> None:
         """Guarda el estado comprobado SIN commit: lo decide quien gestiona la
         transacción (StatusService.check_all). UPDATE directo: solo toca estado
-        y marca; nunca inserta filas ni altera `updated_at`. Si la IP no existe
-        en el inventario, no hace nada."""
+        y marca; nunca inserta filas ni altera `updated_at`. NUNCA sobrescribe
+        una fila `no_fiable` (AD-10/AD-2): el mismatch de fingerprint debe
+        sobrevivir a los barridos del loop de estado. Si la IP no existe en el
+        inventario, no hace nada."""
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
         await self._conn.execute(

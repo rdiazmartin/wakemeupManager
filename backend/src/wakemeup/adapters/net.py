@@ -1,15 +1,22 @@
-"""Adaptador de red: descubrimiento sin root (AD-3).
+"""Adaptador de red: descubrimiento sin root (AD-3) y WOL (FR-4/FR-5).
 
 Técnica verificada en la arquitectura: binario `ping` del distro + lectura de
 `/proc/net/arp` (mundo-readable), sin capabilities ni paquetes extra. Si el
 binario ping falla por permisos, el escaneo continúa de forma degradada con
 solo la tabla ARP (nunca bloquea).
+
+WOL (epic 2): `send_wol` valida la MAC (12 hex, no multicast, distinta de
+cero), construye el magic packet (6×0xFF + MAC×16) y lo envía al broadcast por
+UDP (SO_BROADCAST) en un único envío; sin interfaz Ethernet emisora → error
+claro que el servicio convierte en éxito con warning (FR-4: el endpoint
+responde éxito y la confirmación llega del estado; sin retry).
 """
 from __future__ import annotations
 
 import asyncio
 import ipaddress
 import logging
+import re
 import socket
 from dataclasses import dataclass
 
@@ -25,6 +32,12 @@ _MAX_CONCURRENT_PINGS = 256
 _MAX_CONCURRENT_LOOKUPS = 8
 _HOSTNAME_TIMEOUT = 1.0
 _SUBPROCESS_TIMEOUT = 5.0
+
+_WOL_PORTS = (9, 7)  # puerto 9 estándar; fallback 7 solo si el envío falla
+
+
+class NoWolInterfaceError(RuntimeError):
+    """Sin interfaz Ethernet con carrier: el wake degrada a éxito con warning."""
 
 # Redes consideradas "propias del BE": loopback físico y subred de la tailnet
 # (AD-3: excluir tailnet y loopback, y cualquier dirección no-LAN).
@@ -294,3 +307,63 @@ class Net:
             return name
         logger.info("sin interfaz Ethernet con carrier (WOL no fiable); healthcheck reporta warning")
         return None
+
+    async def send_wol(self, mac: str, interface: str | None = None) -> str:
+        """Envía UN magic packet del WOL (FR-4/AC 2.2) y devuelve la interfaz usada.
+
+        - Valida la MAC (12 o 17 con `:`/`-`); rechaza multicast (bit LSB del
+          primer octeto) y la MAC cero → [ValueError] (el API responde 422).
+        - Sin `interface` explícita, usa la de [wol_interface]; si no hay
+          Ethernet con carrier → [RuntimeError] (sin bloqueo: el servicio lo
+          convierte en éxito con warning, nota de diseño 2.2).
+        - Construye 6×0xFF + MAC×16 y lo envía por UDP al broadcast
+          `255.255.255.255:9` (SO_BROADCAST), sin retry, bindeado a la
+          interfaz emisora (el enlace solo sale por la LAN física, AD-3/AD-4).
+        """
+        mac_bytes = self.normalize_mac(mac)
+        magic = b"\xff" * 6 + mac_bytes * 16
+        if interface is None:
+            interface = await self.wol_interface()
+            if interface is None:
+                raise NoWolInterfaceError(
+                    "sin interfaz Ethernet con carrier (WOL no fiable vía WiFi); "
+                    "GET /status reporta warning"
+                )
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            try:
+                # SO_BINDTODEVICE requiere CAP_NET_RAW; sin él se envía por la
+                # ruta por defecto (la LAN física en el despliegue AD-4).
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface.encode())
+            except OSError:
+                logger.warning("no se pudo bindear %s (sin CAP_NET_RAW); envío por la ruta por defecto", interface)
+            last_error: OSError | None = None
+            for port in _WOL_PORTS:
+                try:
+                    sock.sendto(magic, ("255.255.255.255", port))
+                except OSError as exc:  # sin permisos de broadcast / socket roto
+                    last_error = exc
+                    continue
+                logger.info("WOL enviado por %s:9 (mac %s)", interface, mac)
+                return interface
+        raise RuntimeError(
+            f"no se pudo emitir el magic packet (¿sin permisos de broadcast?): {last_error}"
+        )
+
+    @staticmethod
+    def normalize_mac(mac: str) -> bytes:
+        """Valida y normaliza una MAC a 6 bytes; [ValueError] si es inválida.
+
+        Acepta 12 hex (`aabbccddeeff`) o 17 con separadores `:`/`-`. Rechaza
+        multicast (bit LSB == 1 del primer octeto, p. ej. `01:...`) y la MAC
+        cero (`00:00:00:00:00:00`).
+        """
+        clean = mac.strip().replace(":", "").replace("-", "")
+        if len(clean) != 12 or not re.fullmatch(r"[0-9a-fA-F]{12}", clean):
+            raise ValueError(f"MAC inválida: {mac!r}")
+        raw = bytes.fromhex(clean)
+        if raw == b"\x00" * 6:
+            raise ValueError("MAC cero: no es una dirección Ethernet válida")
+        if raw[0] & 0x01:
+            raise ValueError("MAC multicast no válida para WOL")
+        return raw

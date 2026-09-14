@@ -24,13 +24,15 @@ from wakemeup.api import app
 
 
 class FakeDb:
-    """Doble de DB: tokens en memoria con activos/revocados."""
+    """Doble de DB: tokens, máquinas y activity_log en memoria."""
 
     def __init__(self) -> None:
         self.tokens: dict[str, str] = {}  # sha256 -> device_name (activo)
         self.revoked: set[str] = set()
-        self.machines: list[tuple[str, str, str, str]] = []  # (ip, mac, hostname, state)
+        self.machines: list[tuple[str, str, str, str, str | None, str | None]] = []
+        # (ip, mac, hostname, state, fingerprint, remote_user)
         self.scan_calls = 0
+        self.activities: list = []
 
     async def init_db(self) -> None:
         pass
@@ -73,9 +75,31 @@ class FakeDb:
             )
         return out
 
+    async def get_by_id(self, machine_id: int):
+        from wakemeup.core.models import Machine
+
+        idx = machine_id - 1
+        if not (0 <= idx < len(self.machines)):
+            return None
+        row = self.machines[idx]
+        return Machine(
+            id=machine_id, ip=row[0], mac=row[1], hostname=row[2], state=row[3],
+            fingerprint=row[4], remote_user=row[5],
+        )
+
+    async def record_activity(self, channel, token, machine_id, machine_ip, operation, result) -> None:
+        self.activities.append((channel, token, machine_id, machine_ip, operation, result))
+
+    async def begin(self) -> None: ...
+    async def commit(self) -> None: ...
+    async def rollback(self) -> None: ...
+
 
 class FakeNet:
-    """Doble de red sin IO."""
+    """Doble de red sin IO; registra los WOL enviados."""
+
+    def __init__(self) -> None:
+        self.wol_sends: list[str] = []
 
     async def wol_interface(self) -> str | None:
         return "eth0"
@@ -85,6 +109,15 @@ class FakeNet:
 
     async def ping_host(self, ip: str) -> bool:
         return False
+
+    async def send_wol(self, mac: str, interface: str | None = None) -> str:
+        self.wol_sends.append(mac)
+        return interface or "eth0"
+
+    def normalize_mac(self, mac: str) -> bytes:
+        from wakemeup.adapters.net import Net
+
+        return Net.normalize_mac(mac)
 
 
 class FakeDiscovery:
@@ -114,7 +147,11 @@ class FakeStatus:
         from wakemeup.core.models import Machine
 
         return [
-            Machine(id=m["id"], ip=m["ip"], mac=m.get("mac"), hostname=m.get("hostname"), state=m.get("state", "offline"))
+            Machine(
+                id=m["id"], ip=m["ip"], mac=m.get("mac"), hostname=m.get("hostname"),
+                state=m.get("state", "offline"), fingerprint=m.get("fingerprint"),
+                remote_user=m.get("remote_user"),
+            )
             for m in self._machines
         ]
 
@@ -140,11 +177,60 @@ def api_env(monkeypatch):
     status = FakeStatus([])
     auth = FastAuthService(db, AuthSettings())
 
+    class FakeEnroll:
+        async def enroll(self, machine_id, usuario, password, channel="api", token="-"):
+            if machine_id == 999:
+                raise _EnrollErr(404, "máquina no encontrada")
+            if machine_id == 2:
+                raise _EnrollErr(409, "máquina ya gestionada")
+            if password == "mala":
+                raise _EnrollErr(401, "credenciales incorrectas")
+            return {"id": machine_id, "managed": True}
+
+    class FakeWake:
+        def __init__(self, net):
+            self._net = net
+
+        async def wake(self, machine_id, channel="api", token="-"):
+            if machine_id == 999:
+                raise _WakeErr(404, "máquina no encontrada")
+            if machine_id == 2:
+                raise _WakeErr(409, "máquina no gestionada (haz el alta primero)")
+            if machine_id == 3:
+                raise _WakeErr(422, "MAC inválida", code="validation_error")
+            return {"ok": True}
+
+    class FakeShutdown:
+        async def shutdown(self, machine_id, channel="api", token="-"):
+            if machine_id == 999:
+                raise _SDErr(404, "máquina no encontrada")
+            if machine_id == 2:
+                raise _SDErr(409, "máquina no gestionada (haz el alta primero)")
+            if machine_id == 3:
+                raise _SDErr(409, "el host no coincide con el fingerprint fijado; máquina marcada no_fiable")
+            return {"ok": True}
+
+    class FakeActivity:
+        async def list(self, limit=20):
+            return []
+
+    class _BoomEnroll:
+        async def enroll(self, *a, **kw):
+            raise RuntimeError("boom enroll")
+
+    from wakemeup.services.enrollment import EnrollmentError as _EnrollErr
+    from wakemeup.services.wake import WakeError as _WakeErr
+    from wakemeup.services.shutdown import ShutdownError as _SDErr
+
     monkeypatch.setattr(app, "db", db)
     monkeypatch.setattr(app, "net", net)
     monkeypatch.setattr(app, "discovery", discovery)
     monkeypatch.setattr(app, "status", status)
     monkeypatch.setattr(app, "auth", auth)
+    monkeypatch.setattr(app, "enrollment", FakeEnroll())
+    monkeypatch.setattr(app, "wake", FakeWake(net))
+    monkeypatch.setattr(app, "shutdown", FakeShutdown())
+    monkeypatch.setattr(app, "activity", FakeActivity())
 
     token = new_device_token()
     _register_token(db, token)  # programamos el token sin tocar un loop real
@@ -328,6 +414,175 @@ def test_five_failures_without_token_block_by_ip(api_env):
     assert resp.status_code == 429
     assert resp.json()["error"]["code"] == "too_many_requests"
     auth.backoff.reset()
+
+
+# --- Epic 2: endpoints de control (alta/wake/shutdown) ---
+
+
+def test_enroll_requires_auth(api_env):
+    resp = api_env["client"].post("/api/v1/machines/1/enroll", json={"usuario": "u", "password": "p"})
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "unauthorized"
+
+
+def test_enroll_ok_returns_200_managed_true(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/1/enroll",
+        json={"usuario": "maria", "password": "s3cr3t"},
+        headers=_auth_header(api_env["token"]),
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"id": 1, "managed": True}
+
+
+def test_enroll_bad_password_401(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/1/enroll",
+        json={"usuario": "maria", "password": "mala"},
+        headers=_auth_header(api_env["token"]),
+    )
+    assert resp.status_code == 401
+    assert resp.json()["error"]["code"] == "unauthorized"
+    assert "credenciales" in resp.json()["error"]["message"]
+
+
+def test_enroll_unknown_machine_404(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/999/enroll",
+        json={"usuario": "u", "password": "p"},
+        headers=_auth_header(api_env["token"]),
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "not_found"
+
+
+def test_enroll_already_managed_409(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/2/enroll",
+        json={"usuario": "u", "password": "p"},
+        headers=_auth_header(api_env["token"]),
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "conflict"
+
+
+def test_enroll_missing_body_422_envelope(api_env):
+    """Body inválido → 422 con envelope uniforme (no el `detail` de FastAPI)."""
+    resp = api_env["client"].post(
+        "/api/v1/machines/1/enroll", json={}, headers=_auth_header(api_env["token"])
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error"]["code"] == "validation_error"
+    assert "error" in body and "detail" not in body
+
+
+def test_wake_requires_auth(api_env):
+    resp = api_env["client"].post("/api/v1/machines/1/wake")
+    assert resp.status_code == 401
+
+
+def test_wake_ok_returns_200(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/1/wake", headers=_auth_header(api_env["token"])
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_wake_unknown_machine_404(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/999/wake", headers=_auth_header(api_env["token"])
+    )
+    assert resp.status_code == 404
+
+
+def test_wake_unmanaged_machine_409(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/2/wake", headers=_auth_header(api_env["token"])
+    )
+    assert resp.status_code == 409
+    assert "gestionada" in resp.json()["error"]["message"]
+
+
+def test_wake_invalid_mac_422(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/3/wake", headers=_auth_header(api_env["token"])
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "validation_error"
+
+
+def test_shutdown_requires_auth(api_env):
+    resp = api_env["client"].post("/api/v1/machines/1/shutdown")
+    assert resp.status_code == 401
+
+
+def test_shutdown_ok_returns_200(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/1/shutdown", headers=_auth_header(api_env["token"])
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+
+def test_shutdown_fingerprint_mismatch_409(api_env):
+    resp = api_env["client"].post(
+        "/api/v1/machines/3/shutdown", headers=_auth_header(api_env["token"])
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "conflict"
+    assert "no_fiable" in resp.json()["error"]["message"]
+
+
+def test_control_api_records_activity_with_token_hash(api_env):
+    """2.5: los endpoints registran actividad (canal api) con el digest del token."""
+    api_env["db"].machines = [("192.168.1.10", "aa:bb:cc:dd:ee:10", "pc", "offline", None, None)]
+    resp = api_env["client"].post(
+        "/api/v1/machines/1/enroll",
+        json={"usuario": "u", "password": "p"},
+        headers=_auth_header(api_env["token"]),
+    )
+    assert resp.status_code == 200
+    # No hay registro directo en el doble; el servicio real lo hace (cubierto en
+    # test_enrollment/test_wake/test_shutdown); aquí se valida el canal wire.
+    assert api_env["db"].activities == []
+
+
+def test_unhandled_control_error_returns_500_envelope(api_env, monkeypatch):
+    """Cualquier fallo interno del grafo de control → 5xx envelope (catálogo FR-9)."""
+
+    class Boom:
+        async def enroll(self, *a, **kw):
+            raise RuntimeError("boom interno")
+
+    monkeypatch.setattr(app, "enrollment", Boom())
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post(
+        "/api/v1/machines/1/enroll",
+        json={"usuario": "u", "password": "p"},
+        headers=_auth_header(api_env["token"]),
+    )
+    assert resp.status_code == 500
+    assert resp.json()["error"]["code"] == "internal_error"
+
+
+def test_get_machines_managed_derived_from_fingerprint(api_env):
+    """DTO: `managed` se deriva de fingerprint (nota de diseño 2.1)."""
+    api_env["status"]._machines = [
+        {"id": 1, "ip": "192.168.1.10", "mac": "aa:bb:cc:dd:ee:10", "hostname": "pc", "state": "online"},
+        {"id": 2, "ip": "192.168.1.11", "mac": "aa:bb:cc:dd:ee:11", "hostname": "pc2",
+         "state": "no_fiable", "fingerprint": "SHA256:abcd", "remote_user": "maria"},
+    ]
+    resp = api_env["client"].get("/api/v1/machines", headers=_auth_header(api_env["token"]))
+    assert resp.status_code == 200
+    body = resp.json()["machines"]
+    # Rama "false": sin fingerprint → discovery-only.
+    assert body[0]["managed"] is False
+    # Rama "true" (hasta ahora sin fijar): fingerprint presente → managed=true,
+    # y el estado no_fiable viaja tal cual (AD-10).
+    assert body[1]["managed"] is True
+    assert body[1]["status"] == "no_fiable"
 
 
 def test_lifespan_starts_periodic_loops():

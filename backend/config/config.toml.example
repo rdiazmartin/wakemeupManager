@@ -30,6 +30,21 @@ prefix = "/api/v1"
 # máquina remota restringido a este comando.
 command = "sudo -n systemctl poweroff"
 
+[ssh]
+# Par de claves Ed25519 del BE (story 2.1, AD-5/AD-9): la privada con permisos
+# 600, la usa solo el servicio como usuario no-root. Generar con:
+#   ssh-keygen -t ed25519 -N "" -f id_ed25519
+# (la pública se instala en authorized_keys de cada máquina durante el alta).
+key_path = "id_ed25519"
+# Ruta ABSOLUTA del home del usuario remoto de control; el alta instala la
+# clave en <remote_home>/.ssh/authorized_keys (idempotente: append si falta)
+# con permisos 0600. OBLIGATORIO (SFTP no expande el tilde): "~" es un error
+# explícito. Vacío "" → el BE resuelve el home del usuario conectado vía SFTP
+# (recomendado si el home difiere por máquina).
+remote_home = "/home/maria"
+# NOTA: la password del alta (POST /enroll) vive SOLO en memoria del proceso
+# (FR-6/AD-5): nunca se configura aquí, ni en disco, logs o entorno.
+
 [auth]
 # Política de backoff de autenticación (FR-10): 5 fallos en 5 minutos
 # bloquean la fuente durante 15 minutos (HTTP 429).
