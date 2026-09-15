@@ -4,6 +4,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-2-descubrimiento-de-maquinas.md`
   summary: Ruta del fichero SQLite CWD-relative: fijarla con config `[db]` e instalador (story 1.4/4.1).
   evidence: Db() usa Path("wakemeup.db") relativo al CWD; en despliegue systemd WorkingDirectory=/var/lib/wakemeup la DB caería ahí sin estar documentado. Decidir ruta + knob env en 1.4.
+  resolution: RESUELTO 2026-09-15 (story 4.1) — el instalador escribe `[db] path = /var/lib/wakemeup/wakemeup.db` (ruta absoluta) y la unidad fija `Environment=WAKEMEUP_DB__PATH=/var/lib/wakemeup/wakemeup.db`; la DB nunca queda a merced del CWD.
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-2-descubrimiento-de-maquinas.md`
   summary: `_in_flight` reporta False durante la fase de upsert de un escaneo en curso.
   evidence: verificado en revision 1.2 (verification-gap): _in_flight se limpia al terminar scan_range, antes del upsert; el endpoint POST /scan de la story 1.4 deberá consumir estado "scanning" real de la tarea _current en lugar de in_flight.
@@ -32,3 +33,4 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-3-epic-3-mcp-y-eventos.md`
   summary: El allowlist de `TransportSecuritySettings` solo admite hosts de `[api] bind_hosts` y loopback; los nombres MagicDNS de la tailnet no están contemplados.
   evidence: Revisión del epic 3 (blind-hunter/edge-case): el SDK valida el header `Host`; si un cliente MCP usa el nombre MagicDNS de la tailnet en lugar de la IP, se rechazaría. Se decide con el bind real de uvicorn en la story 4.1.
+  resolution: RESUELTO 2026-09-15 (story 4.1, Q2=IMPLEMENTAR) — nueva clave `[api] extra_allowed_hosts` que se suma al allowlist de `_build_transport_security` además de `bind_hosts`/loopback; el instalador escribe el `DNSName` de tailscale detectado (`tailscale status --json`) y el test `test_transport_security_includes_extra_allowed_hosts` lo verifica.

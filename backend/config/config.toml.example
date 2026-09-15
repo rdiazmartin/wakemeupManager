@@ -18,14 +18,21 @@ ttl_seconds = 60
 path = "wakemeup.db"
 
 [api]
-# Interfaz a la que se vincula el BE (FR-9, AD-6): solo tailnet + loopback.
-# P. ej. ["100.100.100.1", "127.0.0.1"]. El bind real de uvicorn se integra
-# en la story 4.1; hoy esta sección también alimenta el guard solo-tailnet
-# del servidor MCP (AD-12, epic 3).
+# Interfaces a las que se vincula el BE (FR-9, AD-6): solo tailnet + loopback,
+# nunca 0.0.0.0 ni la LAN física. El instalador de despliegue (story 4.1)
+# detecta la IP tailnet (`tailscale ip -4`) y escribe aquí [<tailnet>, "127.0.0.1"];
+# en local dev basta ["127.0.0.1"].
 bind_hosts = ["127.0.0.1"]
 port = 8080
 # Prefijo de los endpoints REST (AD-1).
 prefix = "/api/v1"
+# El runner `wakemeup.server` reintenta los hosts no asignables (tailnet
+# tardía) hasta este plazo y luego degrada a los que sí existan sin abortar.
+bind_retry_seconds = 30
+# Nombres adicionales permitidos en el `Host` header del MCP (AD-12), además
+# de `bind_hosts` y loopback. El instalador escribe aquí el DNSName de
+# tailscale (MagicDNS); p. ej. ["testing.tailnet.ts.net"].
+extra_allowed_hosts = []
 
 [shutdown]
 # Comando de apagado del BE vía SSH (AD-4). Requiere sudoers NOPASSWD en la

@@ -99,30 +99,42 @@ def _build_services() -> dict[str, Any]:
     }
 
 
+def _host_header_pattern(host: str) -> str:
+    """Patrón de `Host` header para `allowed_hosts` con puerto comodín.
+
+    Un literal IPv6 necesita corchetes en el `Host` header (`[fd7a::1]:8080`);
+    sin ellos el patrón (`fd7a::1:*`) es malformado y no casaría nunca. Los
+    nombres (p. ej. el DNSName de tailscale / MagicDNS) se usan tal cual.
+    """
+    import ipaddress
+
+    try:
+        is_ipv6 = ipaddress.ip_address(host).version == 6
+    except ValueError:
+        is_ipv6 = False
+    return f"[{host}]:*" if is_ipv6 else f"{host}:*"
+
+
 def _build_transport_security():
     """`TransportSecuritySettings` para el host header del MCP (AD-12).
 
     Habilita la protección contra DNS rebinding y permite los hosts de la
-    tailnet/loopback (`bind_hosts` de `[api]` + loopback), con puerto comodín.
-    El guard de IP de la capa FastAPI (`is_trusted_client`) es la defensa real;
-    esto añade la validación del `Host` que exige el SDK.
+    tailnet/loopback (`bind_hosts` de `[api]` + loopback) más los nombres
+    extra (`extra_allowed_hosts`, p. ej. el DNSName de tailscale/MagicDNS),
+    todos con puerto comodín. El guard de IP de la capa FastAPI
+    (`is_trusted_client`) es la defensa real; esto añade la validación del
+    `Host` que exige el SDK.
     """
     from mcp.server.transport_security import TransportSecuritySettings
 
-    import ipaddress
-
     settings = Settings()
     allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-    for host in settings.api.bind_hosts:
+    for host in (*settings.api.bind_hosts, *settings.api.extra_allowed_hosts):
         if not host:
             continue
-        # Un host IPv6 necesita corchetes en el `Host` header (`[fd7a::1]:8080`);
-        # sin ellos el patrón (`fd7a::1:*`) es malformado y no casaría nunca.
-        try:
-            is_ipv6 = ipaddress.ip_address(host).version == 6
-        except ValueError:
-            is_ipv6 = False
-        allowed_hosts.append(f"[{host}]:*" if is_ipv6 else f"{host}:*")
+        pattern = _host_header_pattern(host)
+        if pattern not in allowed_hosts:
+            allowed_hosts.append(pattern)
     return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=allowed_hosts,

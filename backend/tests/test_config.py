@@ -87,12 +87,15 @@ def test_ssh_and_shutdown_sections_defaults(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_api_section_defaults_and_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Epic 3: `[api]` (bind/port/prefix) se parsea para el guard solo-tailnet."""
+    """`[api]` (bind/port/prefix) gobierna el bind real y el guard solo-tailnet."""
     monkeypatch.setattr("wakemeup.config.default_config_path", lambda: "/nonexistent/config.toml")
     settings = Settings()
     assert settings.api.bind_hosts == ["127.0.0.1"]
     assert settings.api.port == 8080
     assert settings.api.prefix == "/api/v1"
+    # Story 4.1: reintento del bind (tailnet tardía) y nombres extra del MCP.
+    assert settings.api.bind_retry_seconds == 30.0
+    assert settings.api.extra_allowed_hosts == []
 
     toml = tmp_path / "config.toml"
     toml.write_text(
@@ -100,11 +103,25 @@ def test_api_section_defaults_and_override(monkeypatch: pytest.MonkeyPatch, tmp_
         'bind_hosts = ["100.100.100.1", "127.0.0.1"]\n'
         "port = 9000\n"
         'prefix = "/api/v1"\n'
+        "bind_retry_seconds = 12\n"
+        'extra_allowed_hosts = ["testing.tailnet.ts.net"]\n'
     )
     monkeypatch.setattr("wakemeup.config.default_config_path", lambda: str(toml))
     settings = Settings()
     assert settings.api.bind_hosts == ["100.100.100.1", "127.0.0.1"]
     assert settings.api.port == 9000
+    assert settings.api.bind_retry_seconds == 12.0
+    assert settings.api.extra_allowed_hosts == ["testing.tailnet.ts.net"]
+
+    monkeypatch.setenv("WAKEMEUP_API__EXTRA_ALLOWED_HOSTS", '["otro.ts.net"]')
+    assert Settings().api.extra_allowed_hosts == ["otro.ts.net"]
+
+
+def test_api_bind_retry_seconds_rejects_negative() -> None:
+    from wakemeup.config import ApiSettings
+
+    with pytest.raises(ValidationError):
+        ApiSettings(bind_retry_seconds=-1)
 
 
 def test_transport_security_allowlist_default_and_ipv6(
@@ -135,6 +152,26 @@ def test_transport_security_allowlist_default_and_ipv6(
     assert "[fd7a:115c:a1e0::1]:*" in security.allowed_hosts
     assert "100.100.100.1:*" in security.allowed_hosts
     assert "fd7a:115c:a1e0::1:*" not in security.allowed_hosts
+
+
+def test_transport_security_includes_extra_allowed_hosts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Story 4.1 (cierra deferred MagicDNS): el `Host` del DNSName de tailscale
+    queda permitido además de `bind_hosts`/loopback."""
+    from wakemeup.api import _build_transport_security
+
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        "[api]\n"
+        'bind_hosts = ["100.77.163.61", "127.0.0.1"]\n'
+        'extra_allowed_hosts = ["testing.tailnet.ts.net"]\n'
+    )
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: str(toml))
+    security = _build_transport_security()
+    assert "testing.tailnet.ts.net:*" in security.allowed_hosts
+    assert "100.77.163.61:*" in security.allowed_hosts
+    assert "127.0.0.1:*" in security.allowed_hosts
 
 
 def test_ssh_and_shutdown_toml_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

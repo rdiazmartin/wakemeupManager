@@ -76,16 +76,21 @@ class ShutdownSettings(BaseModel):
 
 
 class ApiSettings(BaseModel):
-    """Sección `[api]` del config.toml (bind, FR-9/AD-6; guard MCP epic 3).
+    """Sección `[api]` del config.toml (bind, FR-9/AD-6; story 4.1).
 
-    `bind_hosts`/`port`/`prefix` ya aparecían en el ejemplo; aquí se parsean
-    para el guard solo-tailnet del MCP (AD-12). El bind real de uvicorn queda
-    para la story 4.1.
+    `bind_hosts` gobierna el bind real del runner (`wakemeup.server`) y el guard
+    solo-tailnet del MCP (AD-12); el runner reintenta los hosts aún no
+    asignables hasta `bind_retry_seconds` (tailnet tardía) y degrada a los que
+    sí existan sin abortar. `extra_allowed_hosts` permite el `Host` header de
+    nombres adicionales (p. ej. el `DNSName` de tailscale / MagicDNS) en el
+    allowlist del MCP además de `bind_hosts` y loopback.
     """
 
     bind_hosts: list[str] = Field(default_factory=lambda: ["127.0.0.1"])
     port: int = Field(default=8080, ge=1, le=65535)
     prefix: str = "/api/v1"
+    bind_retry_seconds: float = Field(default=30.0, ge=0)
+    extra_allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class Settings(BaseSettings):

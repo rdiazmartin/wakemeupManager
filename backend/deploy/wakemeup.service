@@ -1,18 +1,20 @@
 [Unit]
 Description=wakemeupManager backend - control de máquinas de la red via WOL/SSH
 Wants=network-online.target
-After=network-online.target
+After=network-online.target tailscaled.service
 
 [Service]
 User=wakemeup
 Group=wakemeup
 WorkingDirectory=/var/lib/wakemeup
-# TODO(4.1): fijar la IP/interface tailnet real como host (AD-6) y la ruta
-# final del binario/venv gestionado por uv (AD-7); aquí referencia local.
-ExecStart=/home/wakemeup/.local/bin/uv run --project /opt/wakemeup/backend uvicorn wakemeup.api:app --host 127.0.0.1 --port 8080
+Environment=WAKEMEUP_DB__PATH=/var/lib/wakemeup/wakemeup.db
+# Intérprete del venv gestionado por `uv` (nunca el Python de sistema 3.11);
+# el runner `wakemeup.server` bindea `[api] bind_hosts` (tailnet + loopback)
+# y tolera que la interfaz tailnet aparezca tarde.
+ExecStart=/opt/wakemeup/backend/.venv/bin/python -m wakemeup.server
 Restart=always
 RestartSec=5
-# Hardening básico (sin ProtectHome: el binario de uv vive en ~wakemeup/.local)
+# Hardening básico (sin ProtectHome: el venv/binario de uv vive en /opt).
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/var/lib/wakemeup

@@ -19,6 +19,8 @@ dependencies = [
 
 [project.scripts]
 wakemeup-cli = "wakemeup.cli:main"
+wakemeup-install = "wakemeup.install:main"
+wakemeup-server = "wakemeup.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wakemeup"]
