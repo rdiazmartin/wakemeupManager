@@ -13,6 +13,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-6-primer-arranque-y-configuracion-de-conexion.md`
   summary: KeystoreSecretStore (producción, en cada arranque) sin ninguna ejecución automatizada: Robolectric no simula AndroidKeyStore.
   evidence: verification-gap 1.6: todos los tests usan dobles en memoria; la construcción de MasterKey/EncryptedSharedPreferences lanza AndroidKeyStore not found en JVM. Requiere verificación en dispositivo (primer arranque real + re-arranque con sesión persistida) o androidTest instrumentado.
+  resolution: RESUELTO 2026-09-14 — verificado en dispositivo real (Samsung SM-T220, Android 14, APK debug del epic 2): primer arranque (FirstRunScreen), re-arranque con sesión reutilizada (va directa al listado, sin re-login) y 401 revocado (token revocado por CLI → polling recibe 401 → limpia config y redirige a Ajustes con campos vacíos). KeystoreSecretStore funciona en producción; no queda acción.
 - source_spec: `_bmad-output/implementation-artifacts/spec-2-epic-2-enciende-y-apaga.md`
   summary: El test Robolectric de no-persistencia de la password del alta solo aserta el cierre del diálogo y el body del POST; el almacén real (Keystore/EncryptedSharedPreferences) no se ejercita.
   evidence: Revisión del epic 2 (blind-hunter): un fallo de persistencia de la password en SecureSettingsRepository no se detectaría en JVM; requiere androidTest instrumentado o verificación en dispositivo (mismo deferred que KeystoreSecretStore de 1.6).

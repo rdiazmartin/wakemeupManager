@@ -40,6 +40,19 @@ class AuthFailedError(SshError):
     """Autenticación rechazada (password incorrecta): 401 en el alta (AC 2.1)."""
 
 
+def _public_key_line(public_key: bytes | str) -> str:
+    """Normaliza una clave pública a la línea OpenSSH en str, sin salto final.
+
+    `asyncssh.SSHKey.export_public_key` devuelve bytes (versiones actuales) o
+    str según la versión; la comparación/escritura en `authorized_keys` es
+    textual, así que aquí se resuelve la ambigüedad en un único punto
+    (regresión del alta real: `bytes.rstrip("\n")` → TypeError → 500).
+    """
+    if isinstance(public_key, bytes):
+        return public_key.decode().rstrip("\n")
+    return public_key.rstrip("\n")
+
+
 class Ssh:
     """Primitivas SSH sobre asyncssh (una conexión por acción)."""
 
@@ -48,7 +61,7 @@ class Ssh:
         self._client_key: asyncssh.SSHKey | None = None
         self._own_public_key: str | None = None
 
-    def _resolve_remote_home(self, sftp: asyncssh.SFTPClient) -> str:
+    async def _resolve_remote_home(self, sftp: asyncssh.SFTPClient) -> str:
         """Home remoto para `authorized_keys` (config `[ssh] remote_home`).
 
         - Ruta absoluta configurada → se usa tal cual (p. ej. `/home/maria`).
@@ -67,13 +80,13 @@ class Ssh:
             )
         if configured:
             return configured.rstrip("/")
-        real = sftp.realpath(".") if hasattr(sftp, "realpath") else None
+        real = await sftp.realpath(".") if hasattr(sftp, "realpath") else None
         if real is None:
             raise SshError(
                 "[ssh] remote_home vacío y el servidor no resolvió el home; "
                 "configura la ruta absoluta (p. ej. /home/maria)"
             )
-        return real.rstrip("/")
+        return str(real).rstrip("/")
 
     @property
     def authorized_keys_path(self) -> str:
@@ -114,7 +127,7 @@ class Ssh:
             private_key = asyncssh.read_private_key(str(key_path))
         except (OSError, ValueError, asyncssh.KeyImportError) as exc:
             raise SshError(f"par de claves SSH ilegible en {key_path}: {exc}") from exc
-        self._own_public_key = private_key.export_public_key()
+        self._own_public_key = _public_key_line(private_key.export_public_key())
         self._client_key = private_key
         return self._client_key
 
@@ -186,10 +199,12 @@ class Ssh:
         `authorized_keys` a 0600 (una umask del servidor NO debe dejar un modo
         que OpenSSH rechace luego en el apagado por clave, AD-9).
         """
-        public_key = self._own_public_key or (await self._load_client_keys()).export_public_key()
+        public_key = self._own_public_key or _public_key_line(
+            (await self._load_client_keys()).export_public_key()
+        )
         async with connection.start_sftp_client() as sftp:
             try:
-                home = self._resolve_remote_home(sftp)
+                home = await self._resolve_remote_home(sftp)
                 await self._ensure_ssh_dir(sftp, home)
                 path = f"{home}/.ssh/authorized_keys"
                 existing = ""
@@ -198,7 +213,11 @@ class Ssh:
                         existing = await fh.read()
                 except (asyncssh.SFTPNoSuchFile, OSError):
                     existing = ""
-                key_line = public_key.rstrip("\n")
+                # `export_public_key` puede devolver bytes o str según versión:
+                # se normaliza a str OpenSSH sin salto final (regresión del alta
+                # real: `bytes.rstrip("\n")` → TypeError → 500).
+                existing = existing.decode() if isinstance(existing, bytes) else existing
+                key_line = _public_key_line(public_key)
                 lines = [ln for ln in existing.splitlines() if ln.strip()]
                 seen = any(ln == key_line for ln in lines)
                 if not seen:

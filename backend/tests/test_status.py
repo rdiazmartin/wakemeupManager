@@ -298,8 +298,12 @@ async def test_check_all_never_overwrites_no_fiable_state(db):
     svc = StatusService(net=FakeNet(alive={"192.168.1.10"}), db=db, scan=ScanSettings(ttl_seconds=300))
     await _seed(db, [HostInfo(ip="192.168.1.10")])
     await db.begin()
-    await db.set_managed(1, "SHA256:abcd", "maria")  # deja state='no_fiable'
+    await db.set_managed(1, "SHA256:abcd", "maria")  # alta: deja state intacto
+    await db.set_no_fiable(1)  # mismatch de fingerprint (el único origen de no_fiable)
     await db.commit()
+    # El alta NO marca no_fiable (AC 2.1: operable); lo hace el mismatch.
+    machine = await db.get_by_id(1)
+    assert machine.fingerprint == "SHA256:abcd"
     assert (await db.get_status("192.168.1.10"))[0] == "no_fiable"
 
     # Barrido con la máquina viva (y otro con la máquina muerta): el estado
@@ -312,3 +316,21 @@ async def test_check_all_never_overwrites_no_fiable_state(db):
     await svc2.check_all()
     state, _ = await db.get_status("192.168.1.10")
     assert state == "no_fiable"
+
+
+@pytest.mark.asyncio
+async def test_set_managed_keeps_machine_operable(db):
+    """Regresión del alta real: `set_managed` NO deja la máquina en no_fiable.
+
+    El alta debe dejar la máquina operable (AC 2.1 "managed: true y puede
+    apagarse"); `no_fiable` es solo para el mismatch de fingerprint del
+    shutdown. Antes, el alta marcaba no_fiable y —con el guard del loop de
+    estado— la máquina quedaba atascada sin acciones en la app.
+    """
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    await db.begin()
+    await db.set_managed(1, "SHA256:abcd", "maria")
+    await db.commit()
+    machine = await db.get_by_id(1)
+    assert machine.fingerprint == "SHA256:abcd"
+    assert machine.state != "no_fiable"

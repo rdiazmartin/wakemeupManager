@@ -94,7 +94,7 @@ _GET_BY_ID = (
 )
 
 _SET_MANAGED = (
-    "UPDATE machines SET fingerprint = ?, remote_user = ?, state = 'no_fiable', updated_at = ? WHERE id = ?;"
+    "UPDATE machines SET fingerprint = ?, remote_user = ?, updated_at = ? WHERE id = ?;"
 )
 
 _SET_NO_FIABLE = "UPDATE machines SET state = 'no_fiable', updated_at = ? WHERE id = ?;"
@@ -231,10 +231,12 @@ class Db:
     async def set_managed(self, machine_id: int, fingerprint: str, remote_user: str) -> None:
         """Fija el fingerprint y el usuario remoto tras un alta correcta (2.1).
 
-        El estado se marca `no_fiable` hasta que un apagado verifique el
-        fingerprint (AD-2): la máquina queda gestionada pero aún sin confiar.
-        Idempotente: el alta sobre una máquina ya gestionada se rechaza en el
-        servicio (409), nunca vuelve a instalar la clave aquí.
+        NO toca `state`: el alta deja la máquina operable (AC 2.1: "puede
+        apagarse") y el estado real online/offline lo fija el loop de estado.
+        `no_fiable` es SOLO para el mismatch de fingerprint en el apagado
+        (AD-2) — marcarlo aquí dejaba la máquina atascada sin acciones en la
+        app (sin vuelta atrás). Idempotente: el alta sobre una máquina ya
+        gestionada se rechaza en el servicio (409), nunca reinstala la clave.
         """
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
