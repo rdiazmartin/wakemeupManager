@@ -75,6 +75,19 @@ class ShutdownSettings(BaseModel):
     command: str = "sudo -n systemctl poweroff"
 
 
+class ApiSettings(BaseModel):
+    """Sección `[api]` del config.toml (bind, FR-9/AD-6; guard MCP epic 3).
+
+    `bind_hosts`/`port`/`prefix` ya aparecían en el ejemplo; aquí se parsean
+    para el guard solo-tailnet del MCP (AD-12). El bind real de uvicorn queda
+    para la story 4.1.
+    """
+
+    bind_hosts: list[str] = Field(default_factory=lambda: ["127.0.0.1"])
+    port: int = Field(default=8080, ge=1, le=65535)
+    prefix: str = "/api/v1"
+
+
 class Settings(BaseSettings):
     """Configuración completa; `[scan]` desde 1.2, `[db]`/`[auth]` desde 1.4,
     `[ssh]`/`[shutdown]` desde el epic 2."""
@@ -90,6 +103,7 @@ class Settings(BaseSettings):
     auth: AuthSettings = Field(default_factory=AuthSettings)
     ssh: SshSettings = Field(default_factory=SshSettings)
     shutdown: ShutdownSettings = Field(default_factory=ShutdownSettings)
+    api: ApiSettings = Field(default_factory=ApiSettings)
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):

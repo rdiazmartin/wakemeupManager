@@ -6,11 +6,14 @@ la representación hex-lower (la CLI hashea la misma representación que la API
 y el CLI de revocación). Los logs de actividad nunca contienen passwords.
 Uso:
 
-    wakemeup-cli token create <nombre>
+    wakemeup-cli token create <nombre> [--kind {device,mcp}]
     wakemeup-cli token revoke <nombre|token-hex-64>
     wakemeup-cli token list
     wakemeup-cli activity list [--limit N]
     wakemeup-cli activity stat
+
+Epic 3 (FR-10b): `--kind mcp` crea un token dedicado del agente (no abre
+REST/SSE); el default `device` conserva el comportamiento existente.
 """
 from __future__ import annotations
 
@@ -40,6 +43,12 @@ async def _async_main(argv: list[str] | None = None) -> int:
 
     p_tok_create = p_create_tokens.add_parser("create", help="alta de token (se muestra UNA sola vez)")
     p_tok_create.add_argument("name", help="nombre del dispositivo (único)")
+    p_tok_create.add_argument(
+        "--kind",
+        choices=("device", "mcp"),
+        default="device",
+        help="tipo de token: device (REST/SSE, default) o mcp (agente IA)",
+    )
 
     p_tok_revoke = p_create_tokens.add_parser("revoke", help="revocar token (por nombre de dispositivo o por el token)")
     p_tok_revoke.add_argument("target", help="nombre del dispositivo o el token a revocar")
@@ -76,10 +85,13 @@ async def _async_main(argv: list[str] | None = None) -> int:
             try:
                 if args.token_action == "create":
                     token = new_device_token()
-                    await db.create_token(args.name, sha256_hex_lower(token))
+                    await db.create_token(args.name, sha256_hex_lower(token), kind=args.kind)
                     await db.commit()
                     print(token)
-                    print(f"token de '{args.name}' creado; muéstralo UNA sola vez.", file=sys.stderr)
+                    print(
+                        f"token {args.kind} de '{args.name}' creado; muéstralo UNA sola vez.",
+                        file=sys.stderr,
+                    )
                 elif args.token_action == "revoke":
                     # Intento 1: por nombre de dispositivo. Intento 2: el
                     # argumento es el propio token → se revoca por su hash
@@ -101,7 +113,7 @@ async def _async_main(argv: list[str] | None = None) -> int:
                 elif args.token_action == "list":
                     for t in await db.list_tokens():
                         estado = "revocado" if t.revoked_at is not None else "activo"
-                        print(f"{t.device_name}\t{estado}")
+                        print(f"{t.device_name}\t{t.kind}\t{estado}")
             except Exception as exc:  # SQLite UNIQUE conflict, etc.
                 logger = logging.getLogger("wakemeup.cli")
                 logger.error("fallo en la operación CLI: %r", exc)

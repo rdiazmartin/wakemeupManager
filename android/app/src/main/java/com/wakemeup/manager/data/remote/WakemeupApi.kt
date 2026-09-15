@@ -5,6 +5,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.plugins.sse.SSE
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.get
 import io.ktor.client.request.post
@@ -125,6 +126,8 @@ class WakemeupApi(
                 requestTimeoutMillis = 15_000
                 connectTimeoutMillis = 10_000
             }
+            // SSE (epic 3, AD-11): el plugin viene en ktor-client-core.
+            install(SSE)
             install(ContentNegotiation) {
                 json(
                     Json {

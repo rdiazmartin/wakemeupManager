@@ -1,6 +1,8 @@
 package com.wakemeup.manager.data.remote
 
+import com.wakemeup.manager.domain.EventOrigin
 import com.wakemeup.manager.domain.Machine
+import com.wakemeup.manager.domain.MachineEvent
 import com.wakemeup.manager.domain.MachineStatus
 import com.wakemeup.manager.domain.ScanResult
 import kotlinx.serialization.Serializable
@@ -8,8 +10,9 @@ import kotlinx.serialization.Serializable
 /**
  * DTOs del contrato fijado en la story 1.4 (`backend/src/wakemeup/api/__init__.py`), verbatim.
  *
- * `GET /api/v1/machines` -> {"machines": [{id,name,ip,mac,hostname,status,managed}]}
+ * `GET /api/v1/machines` -> {"machines": [{id,name,ip,mac,hostname,status,managed,last_origin,last_change_at}]}
  * `POST /api/v1/scan` -> 202 {"scan": {running,triggered,discovered,duration_ms}}
+ * `GET /api/v1/events` -> SSE `data: {type,machine,timestamp,origin}` (epic 3, AD-11)
  * Envelope de error: {"error": {code, message}}
  */
 
@@ -22,6 +25,9 @@ data class MachineDto(
     val hostname: String? = null,
     val status: String,
     val managed: Boolean = false,
+    // Aditivos (epic 3, AD-10 intacto): fallback de notificación por polling.
+    val last_origin: String? = null,
+    val last_change_at: String? = null,
 ) {
     fun toDomain(): Machine = Machine(
         id = id,
@@ -31,6 +37,8 @@ data class MachineDto(
         hostname = hostname,
         status = MachineStatus.fromWire(status),
         managed = managed,
+        lastOrigin = last_origin?.let { EventOrigin.fromWire(it) },
+        lastChangeAt = last_change_at,
     )
 }
 
@@ -80,3 +88,24 @@ data class ApiErrorPayloadDto(
 data class ApiErrorEnvelopeDto(
     val error: ApiErrorPayloadDto,
 )
+
+/**
+ * Evento del stream SSE (`GET /api/v1/events`, epic 3/AD-11): la línea
+ * `data: {...}` con `{type, machine, timestamp, origin}`. Campos desconocidos
+ * se ignoran (`ignoreUnknownKeys`) y un evento mal formado se descarta en el
+ * cliente sin romper el stream (DTO tolerante).
+ */
+@Serializable
+data class MachineEventDto(
+    val type: String,
+    val machine: String,
+    val timestamp: String,
+    val origin: String,
+) {
+    fun toDomain(): MachineEvent = MachineEvent(
+        type = type,
+        machine = machine,
+        timestamp = timestamp,
+        origin = EventOrigin.fromWire(origin),
+    )
+}

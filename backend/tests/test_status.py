@@ -319,6 +319,224 @@ async def test_check_all_never_overwrites_no_fiable_state(db):
 
 
 @pytest.mark.asyncio
+async def test_check_all_emits_transition_with_periodic_origin(db):
+    """3.3: una transición real de estado se persiste y emite con origen periodic."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    net = FakeNet(alive={"192.168.1.10"})
+    svc = StatusService(net=net, db=db, scan=ScanSettings(ttl_seconds=60), events=bus)
+    await _seed(db, [HostInfo(ip="192.168.1.10"), HostInfo(ip="192.168.1.11")])
+    # La .11 estaba online y ahora no responde → transición real a offline.
+    await db.begin()
+    await db.set_status("192.168.1.11", "online", origin="periodic")
+    await db.commit()
+
+    async with bus.subscribe() as queue:
+        await svc.check_all()
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+    emitted = {(e.machine, e.origin, e.type) for e in events}
+    assert ("192.168.1.10", "periodic", "machine_online") in emitted
+    assert ("192.168.1.11", "periodic", "machine_offline") in emitted
+    # El evento no transporta credenciales ni claves.
+    for e in events:
+        assert set(e.to_payload()) == {"type", "machine", "timestamp", "origin"}
+    # La transición quedó registrada en FR-11 y con last_origin persistido.
+    assert await db.activity_stats() == [
+        ("status", "offline", 1), ("status", "online", 1)
+    ]
+    machine = await db.get_by_id(1)
+    assert machine.last_origin == "periodic"
+    assert machine.last_change_at is not None
+
+
+@pytest.mark.asyncio
+async def test_sweep_transition_preserves_recent_mcp_origin(db):
+    """3.5: el desenlace de una acción del agente conserva `origin='mcp'`.
+
+    El wake del MCP fija `last_origin='mcp'` (estado aún offline); cuando el
+    barrido detecta la transición offline→online, debe conservar el origen
+    `mcp` en la fila, el evento y la actividad — si no, el fallback de polling
+    de la app nunca notificaría (FR-18).
+    """
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    await db.begin()
+    await db.set_last_change(1, "mcp")
+    await db.commit()
+
+    svc = StatusService(
+        net=FakeNet(alive={"192.168.1.10"}), db=db, scan=ScanSettings(ttl_seconds=60),
+        events=bus,
+    )
+    async with bus.subscribe() as queue:
+        await svc.check_all()
+        event = queue.get_nowait()
+
+    assert event.type == "machine_online"
+    assert event.origin == "mcp"
+    machine = await db.get_by_id(1)
+    assert machine.state == "online"
+    assert machine.last_origin == "mcp"
+    assert machine.last_change_at is not None
+    # La actividad también queda con canal mcp (FR-11).
+    assert ("status", "online", 1) in [
+        (op, res, c) for op, res, c in await db.activity_stats()
+    ]
+    entries = await db.list_activity(limit=5)
+    assert entries[-1].channel == "mcp"
+
+
+@pytest.mark.asyncio
+async def test_check_all_skips_transition_marked_no_fiable_mid_sweep(db):
+    """Regresión: si la fila pasa a `no_fiable` entre la lectura y el UPDATE
+    (p. ej. un shutdown con mismatch de fingerprint), `set_status` afecta a 0
+    filas y NO debe registrarse actividad ni emitirse evento de esa transición."""
+    from wakemeup.services.events import EventBus
+
+    class RacingDb(Db):
+        """Marca `no_fiable` la máquina leída justo antes del UPDATE del barrido."""
+
+        def __init__(self, path) -> None:
+            super().__init__(path)
+            self.race = True
+
+        async def list_machines(self):
+            stale = await super().list_machines()
+            if self.race:
+                self.race = False
+                await self.begin()
+                await self.set_no_fiable(stale[0].id, origin="api")
+                await self.commit()
+            return stale
+
+    racing = RacingDb(path=db._path)
+    await racing.init_db()
+    bus = EventBus()
+    await _seed(racing, [HostInfo(ip="192.168.1.10")])
+
+    svc = StatusService(
+        net=FakeNet(alive={"192.168.1.10"}), db=racing,
+        scan=ScanSettings(ttl_seconds=60), events=bus,
+    )
+    async with bus.subscribe() as queue:
+        await svc.check_all()
+        assert queue.qsize() == 0  # sin evento espurio
+
+    # Sin actividad de estado y la fila conserva `no_fiable`.
+    assert await racing.activity_stats() == []
+    machine = await racing.get_by_id(1)
+    assert machine.state == "no_fiable"
+    await racing.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_transition_uses_periodic_when_mcp_stamp_stale(db):
+    """3.5: un `last_origin='mcp'` caducado no se conserva (→ `periodic`)."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    await db.begin()
+    await db.set_last_change(1, "mcp")
+    # Envejece la marca más allá de la ventana (2×intervalo, mín. 120 s).
+    await db._conn.execute(
+        "UPDATE machines SET last_change_at = ? WHERE id = 1",
+        (_checked_at(600),),
+    )
+    await db.commit()
+
+    svc = StatusService(
+        net=FakeNet(alive={"192.168.1.10"}), db=db, scan=ScanSettings(ttl_seconds=60),
+        events=bus,
+    )
+    async with bus.subscribe() as queue:
+        await svc.check_all()
+        event = queue.get_nowait()
+
+    assert event.origin == "periodic"
+    machine = await db.get_by_id(1)
+    assert machine.last_origin == "periodic"
+
+
+@pytest.mark.asyncio
+async def test_periodic_sweep_preserves_mcp_last_origin_without_change(db):
+    """3.5: un barrido sin transición no pisa el `last_origin='mcp'` previo.
+
+    El fallback de notificación por polling lee `last_origin`; un sweep
+    periódico que no cambia el estado no debe borrar el origen del cambio real.
+    """
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    await db.begin()
+    await db.set_status("192.168.1.10", "online", origin="mcp")
+    await db.commit()
+    svc = StatusService(
+        net=FakeNet(alive={"192.168.1.10"}), db=db, scan=ScanSettings(ttl_seconds=300)
+    )
+    await svc.check_all()  # online -> online: sin transición
+    machine = await db.get_by_id(1)
+    assert machine.last_origin == "mcp"
+
+
+@pytest.mark.asyncio
+async def test_check_all_does_not_emit_without_change(db):
+    """3.3: sin cambio de estado (previo == nuevo) no se emite ni registra nada."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    net = FakeNet(alive={"192.168.1.10"})
+    svc = StatusService(net=net, db=db, scan=ScanSettings(ttl_seconds=60), events=bus)
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+
+    async with bus.subscribe() as queue:
+        await svc.check_all()  # offline -> online (transición)
+        queue.get_nowait()
+        await svc.check_all()  # online -> online (sin cambio)
+        assert queue.qsize() == 0
+
+
+@pytest.mark.asyncio
+async def test_event_without_subscribers_is_dropped(db):
+    """3.3: sin suscriptores el evento se omite (v1 sin cola de entrega)."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    net = FakeNet(alive={"192.168.1.10"})
+    svc = StatusService(net=net, db=db, scan=ScanSettings(ttl_seconds=60), events=bus)
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    await svc.check_all()  # no debe romper sin suscriptores
+    assert bus.subscriber_count == 0
+
+
+@pytest.mark.asyncio
+async def test_set_no_fiable_persists_origin_and_change_at(db):
+    """3.3: `set_no_fiable(origin='mcp')` persiste estado, origen y marca."""
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    await db.begin()
+    await db.set_no_fiable(1, origin="mcp")
+    await db.commit()
+    machine = await db.get_by_id(1)
+    assert machine.state == "no_fiable"
+    assert machine.last_origin == "mcp"
+    assert machine.last_change_at is not None
+
+
+@pytest.mark.asyncio
+async def test_set_last_change_persists_origin_for_polling(db):
+    """3.5: `set_last_change` persiste el origen del último cambio (FR-18)."""
+    await _seed(db, [HostInfo(ip="192.168.1.10")])
+    await db.begin()
+    await db.set_last_change(1, "mcp")
+    await db.commit()
+    machine = await db.get_by_id(1)
+    assert machine.last_origin == "mcp"
+    assert machine.last_change_at is not None
+    assert machine.state == "offline"  # no altera el estado
+
+
+@pytest.mark.asyncio
 async def test_set_managed_keeps_machine_operable(db):
     """Regresión del alta real: `set_managed` NO deja la máquina en no_fiable.
 

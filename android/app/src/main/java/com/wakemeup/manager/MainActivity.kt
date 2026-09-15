@@ -2,8 +2,13 @@ package com.wakemeup.manager
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -12,9 +17,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.wakemeup.manager.data.local.SettingsRepository
 import com.wakemeup.manager.data.remote.WakemeupApi
+import com.wakemeup.manager.data.remote.WakemeupEventStream
+import com.wakemeup.manager.notifications.AndroidMachineNotifier
+import com.wakemeup.manager.notifications.MachineNotifier
+import com.wakemeup.manager.notifications.NotificationPermissionPrompt
 import com.wakemeup.manager.ui.machines.MachineListScreen
 import com.wakemeup.manager.ui.machines.MachineListViewModel
 import com.wakemeup.manager.ui.setup.FirstRunScreen
@@ -55,6 +66,16 @@ class MainActivity : ComponentActivity() {
         /** Hook de tests: cliente HTTP override (MockEngine en Robolectric). */
         @Volatile
         var httpClientFactory: () -> io.ktor.client.HttpClient = { WakemeupApi.defaultClient() }
+
+        /** Hook de tests: notificador override (sin tocar NotificationManager). */
+        @Volatile
+        var notifierFactory: (android.content.Context) -> MachineNotifier =
+            { ctx -> AndroidMachineNotifier(ctx.applicationContext) }
+
+        /** Hook de tests: fuente de eventos SSE override (sin red real). */
+        @Volatile
+        var eventStreamFactory: (SettingsRepository, io.ktor.client.HttpClient) -> com.wakemeup.manager.data.remote.EventStream =
+            { settings, client -> WakemeupEventStream(settings, client) }
     }
 }
 
@@ -104,9 +125,18 @@ internal fun AppRoot(settings: SettingsRepository, client: io.ktor.client.HttpCl
         }
 
         StartupState.MACHINES -> {
+            val context = LocalContext.current
+            val notifier = remember(context) { MainActivity.notifierFactory(context.applicationContext) }
+            val eventStream = remember(settings.apiUrl, settings.deviceToken, client) {
+                MainActivity.eventStreamFactory(settings, client)
+            }
             val machineViewModel: MachineListViewModel = viewModel(
                 key = "machines-${settings.apiUrl}-${settings.deviceToken}",
-                factory = MachineListViewModel.createFactory(api = rememberApi(settings, client)),
+                factory = MachineListViewModel.createFactory(
+                    api = rememberApi(settings, client),
+                    eventStream = eventStream,
+                    notifier = notifier,
+                ),
             )
             // 401 revocado en sesión activa → limpiar configuración y volver a
             // ajustes. Se re-colecta si el ViewModel se recrea (cambio de sesión).
@@ -118,6 +148,9 @@ internal fun AppRoot(settings: SettingsRepository, client: io.ktor.client.HttpCl
                     startup = StartupState.SETTINGS
                 }
             }
+            // Permiso POST_NOTIFICATIONS (epic 3, FR-18): se pide al primer
+            // evento `mcp`, con explicación; denegado → se sugiere ajustes.
+            NotificationPermissionHost(machineViewModel)
             // Al salir del listado (ajustes u otro estado) se detiene el polling.
             DisposableEffect(machineViewModel) {
                 onDispose { machineViewModel.stop() }
@@ -130,6 +163,61 @@ internal fun AppRoot(settings: SettingsRepository, client: io.ktor.client.HttpCl
                 },
             )
         }
+    }
+}
+
+/**
+ * Resuelve el permiso `POST_NOTIFICATIONS` (epic 3, FR-18) cuando el notificador
+ * emite un prompt al recibir el primer evento `mcp`: pide el permiso con
+ * explicación (Android 13+) o sugiere activarlo en ajustes si ya se denegó.
+ */
+@Composable
+private fun NotificationPermissionHost(viewModel: MachineListViewModel) {
+    val context = LocalContext.current
+    var requesting by remember { mutableStateOf(false) }
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (!granted) {
+            // Denegado: la fila ya se actualizó; se sugiere activarlo en ajustes.
+            android.widget.Toast.makeText(
+                context,
+                context.getString(R.string.notification_permission_settings_suggestion),
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+    LaunchedEffect(viewModel) {
+        viewModel.notificationPermissionPrompts.collect { prompt ->
+            when (prompt) {
+                NotificationPermissionPrompt.REQUEST -> requesting = true
+                NotificationPermissionPrompt.SETTINGS -> android.widget.Toast.makeText(
+                    context,
+                    context.getString(R.string.notification_permission_settings_suggestion),
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    }
+    if (requesting) {
+        AlertDialog(
+            onDismissRequest = { requesting = false },
+            title = { Text(stringResource(R.string.notification_permission_rationale_title)) },
+            text = { Text(stringResource(R.string.notification_permission_rationale_body)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    requesting = false
+                    launcher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }) {
+                    Text(stringResource(R.string.notification_permission_rationale_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { requesting = false }) {
+                    Text(stringResource(R.string.notification_permission_rationale_cancel))
+                }
+            },
+        )
     }
 }
 

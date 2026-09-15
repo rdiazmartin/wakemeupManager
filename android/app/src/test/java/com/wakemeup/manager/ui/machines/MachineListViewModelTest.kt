@@ -134,10 +134,14 @@ class MachineListViewModelTest {
         api: WakemeupApi,
         cache: MachinesCache = MachinesCache(),
         pollMs: Long = MachineListViewModel.DEFAULT_POLL_INTERVAL_MS,
+        eventStream: com.wakemeup.manager.data.remote.EventStream = com.wakemeup.manager.data.remote.EventStream.noop(),
+        notifier: com.wakemeup.manager.notifications.MachineNotifier = com.wakemeup.manager.notifications.MachineNotifier.noop(),
     ): MachineListViewModel =
         MachineListViewModel(
             api = api,
             cache = cache,
+            eventStream = eventStream,
+            notifier = notifier,
             pollingIntervalMs = pollMs,
             timeProvider = { 0L },
             externalScope = backgroundScope,
@@ -477,24 +481,31 @@ class MachineListViewModelTest {
     }
 
     @Test
-    fun `ahorro de bateria pausa el polling y al restaurar se reanuda`() = runTest {
+    fun `ahorro de bateria pausa el SSE y mantiene el polling`() = runTest {
         val (api, log) = okApi()
-        val vm = newViewModel(api, pollMs = 30_000L)
+        val stream = RecordingEventStream()
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, pollMs = 30_000L, eventStream = stream, notifier = notifier)
         vm.start()
         runCurrent()
         assertThat(log.filter { it.first == "GET" }).hasSize(1)
+        assertThat(stream.subscriptions).isEqualTo(1)
 
-        // Ahorro de batería: el tiempo puede pasar sin que se produzcan fetches.
+        // Ahorro de batería: el SSE se pausa, pero el polling sigue activo.
         vm.setBatterySaver(true)
-        advanceTimeBy(300_000L)
         runCurrent()
-        assertThat(log.filter { it.first == "GET" }).hasSize(1)
+        assertThat(stream.subscriptions).isEqualTo(1)
+        assertThat(stream.active).isFalse()
 
-        // Al restaurar, el polling se relanza y refresca (NFR-10).
-        vm.setBatterySaver(false)
-        runCurrent()
+        advanceTimeBy(30_000L)
         runCurrent()
         assertThat(log.filter { it.first == "GET" }).hasSize(2)
+
+        // Al restaurar, el SSE se reabre (FR-12/FR-18).
+        vm.setBatterySaver(false)
+        runCurrent()
+        assertThat(stream.subscriptions).isEqualTo(2)
+        assertThat(stream.active).isTrue()
 
         advanceTimeBy(30_000L)
         runCurrent()
@@ -873,6 +884,296 @@ class MachineListViewModelTest {
         assertThat(getLog).hasSize(2)
         // …y la lista refleja el estado nuevo del BE (managed=true).
         assertThat(vm.uiState.value.machines.single().managed).isTrue()
+    }
+
+    // --- Epic 3: eventos SSE, fallback de polling y notificación (3.4/3.5) ---
+
+    /** Fuente de eventos de test: expone un SharedFlow alimentable y cuenta suscripciones. */
+    private class RecordingEventStream : com.wakemeup.manager.data.remote.EventStream {
+        val events = kotlinx.coroutines.flow.MutableSharedFlow<com.wakemeup.manager.domain.MachineEvent>(
+            extraBufferCapacity = 16,
+        )
+        var subscriptions = 0
+            private set
+        var active = false
+            private set
+
+        override fun events(): kotlinx.coroutines.flow.Flow<com.wakemeup.manager.domain.MachineEvent> =
+            kotlinx.coroutines.flow.flow {
+                subscriptions++
+                active = true
+                try {
+                    events.collect { emit(it) }
+                } finally {
+                    active = false
+                }
+            }
+    }
+
+    /** Stream que falla al colectar: para el camino de 401 (y de error genérico). */
+    private class ThrowingEventStream(private val error: Throwable) :
+        com.wakemeup.manager.data.remote.EventStream {
+        override fun events(): kotlinx.coroutines.flow.Flow<com.wakemeup.manager.domain.MachineEvent> =
+            kotlinx.coroutines.flow.flow { throw error }
+    }
+
+    /** Notificador de test: registra lo notificado (y no toca Android). */
+    private class RecordingNotifier : com.wakemeup.manager.notifications.MachineNotifier {
+        val notified = mutableListOf<com.wakemeup.manager.domain.MachineEvent>()
+        private val prompts =
+            kotlinx.coroutines.flow.MutableSharedFlow<com.wakemeup.manager.notifications.NotificationPermissionPrompt>(
+                extraBufferCapacity = 1,
+            )
+        override val permissionPrompts:
+            kotlinx.coroutines.flow.SharedFlow<com.wakemeup.manager.notifications.NotificationPermissionPrompt> =
+            prompts
+
+        override fun notify(event: com.wakemeup.manager.domain.MachineEvent) {
+            notified.add(event)
+        }
+    }
+
+    private fun event(
+        type: String,
+        machine: String,
+        origin: com.wakemeup.manager.domain.EventOrigin,
+        timestamp: String = "2026-09-15T10:00:00+00:00",
+    ) = com.wakemeup.manager.domain.MachineEvent(
+        type = type,
+        machine = machine,
+        timestamp = timestamp,
+        origin = origin,
+    )
+
+    @Test
+    fun `evento mcp actualiza la fila sin spinner ni snackbar y notifica`() = runTest {
+        val (api, _) = okApi()
+        val stream = RecordingEventStream()
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, eventStream = stream, notifier = notifier)
+        vm.start()
+        runCurrent()
+        assertThat(vm.uiState.value.machines).hasSize(2)
+
+        stream.events.tryEmit(event("machine_offline", "Desktop", com.wakemeup.manager.domain.EventOrigin.MCP))
+        runCurrent()
+
+        val updated = vm.uiState.value.machines.first { it.name == "Desktop" }
+        assertThat(updated.status).isEqualTo(MachineStatus.OFFLINE)
+        // Sin spinner ni snackbar (acciones ajenas, UX-DR7).
+        assertThat(vm.uiState.value.isRefreshing).isFalse()
+        assertThat(vm.uiState.value.actionMessage).isNull()
+        // Origen mcp → notificación (FR-18).
+        assertThat(notifier.notified).hasSize(1)
+        assertThat(notifier.notified[0].machine).isEqualTo("Desktop")
+    }
+
+    @Test
+    fun `evento api scan periodic no notifica pero actualiza la fila`() = runTest {
+        val (api, _) = okApi()
+        val stream = RecordingEventStream()
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, eventStream = stream, notifier = notifier)
+        vm.start()
+        runCurrent()
+
+        listOf(
+            com.wakemeup.manager.domain.EventOrigin.API,
+            com.wakemeup.manager.domain.EventOrigin.SCAN,
+            com.wakemeup.manager.domain.EventOrigin.PERIODIC,
+        ).forEach { origin ->
+            stream.events.tryEmit(event("machine_online", "Desktop", origin))
+            runCurrent()
+        }
+
+        assertThat(notifier.notified).isEmpty()
+        assertThat(vm.uiState.value.machines.first { it.name == "Desktop" }.status)
+            .isEqualTo(MachineStatus.ONLINE)
+    }
+
+    @Test
+    fun `evento mal formado no rompe el viewmodel`() = runTest {
+        val (api, _) = okApi()
+        val stream = RecordingEventStream()
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, eventStream = stream, notifier = notifier)
+        vm.start()
+        runCurrent()
+
+        // Un tipo/origen desconocido degrada sin crash y sin notificación.
+        stream.events.tryEmit(event("algo_raro", "Desktop", com.wakemeup.manager.domain.EventOrigin.UNKNOWN))
+        runCurrent()
+
+        assertThat(notifier.notified).isEmpty()
+        // La fila sigue intacta (no hay transición que aplicar).
+        assertThat(vm.uiState.value.machines.first { it.name == "Desktop" }.status)
+            .isEqualTo(MachineStatus.ONLINE)
+    }
+
+    @Test
+    fun `fallback de polling notifica un mcp nuevo por last_origin`() = runTest {
+        var machinesJsonAnswer = machinesJson()
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { respond(machinesJsonAnswer, HttpStatusCode.OK, jsonHeaders()) },
+        )
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, notifier = notifier, pollMs = 30_000L)
+        vm.start()
+        runCurrent()
+        // Primer poll: sin cambios mcp → no notifica.
+        assertThat(notifier.notified).isEmpty()
+
+        // El BE refleja un cambio mcp nuevo (otro timestamp).
+        machinesJsonAnswer = """{"machines":[{"id":1,"name":"Desktop","ip":"192.168.1.10","mac":"AA:BB:CC:DD:EE:01","hostname":"desktop","status":"offline","managed":false,"last_origin":"mcp","last_change_at":"2026-09-15T10:05:00+00:00"}]}"""
+        advanceTimeBy(30_000L)
+        runCurrent()
+
+        assertThat(notifier.notified).hasSize(1)
+        assertThat(notifier.notified[0].machine).isEqualTo("Desktop")
+        assertThat(notifier.notified[0].origin).isEqualTo(com.wakemeup.manager.domain.EventOrigin.MCP)
+    }
+
+    @Test
+    fun `no duplica notificacion si el cambio ya llego por SSE`() = runTest {
+        var machinesJsonAnswer = machinesJson()
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { respond(machinesJsonAnswer, HttpStatusCode.OK, jsonHeaders()) },
+        )
+        val stream = RecordingEventStream()
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, eventStream = stream, notifier = notifier, pollMs = 30_000L)
+        vm.start()
+        runCurrent()
+
+        // El mismo cambio llega primero por SSE (origen mcp).
+        stream.events.tryEmit(
+            event(
+                "machine_offline",
+                "Desktop",
+                com.wakemeup.manager.domain.EventOrigin.MCP,
+                timestamp = "2026-09-15T10:05:00+00:00",
+            )
+        )
+        runCurrent()
+        assertThat(notifier.notified).hasSize(1)
+
+        // El polling posterior ve el mismo cambio (last_change_at ~ el del SSE).
+        machinesJsonAnswer = """{"machines":[{"id":1,"name":"Desktop","ip":"192.168.1.10","mac":"AA:BB:CC:DD:EE:01","hostname":"desktop","status":"offline","managed":false,"last_origin":"mcp","last_change_at":"2026-09-15T10:05:01+00:00"}]}"""
+        advanceTimeBy(30_000L)
+        runCurrent()
+
+        // No se duplica (misma marca dentro de la tolerancia).
+        assertThat(notifier.notified).hasSize(1)
+    }
+
+    @Test
+    fun `401 en el stream emite sesion invalida`() = runTest {
+        val (api, _) = okApi()
+        val vm = newViewModel(
+            api,
+            eventStream = ThrowingEventStream(
+                com.wakemeup.manager.data.remote.ApiException("unauthorized", "revocado"),
+            ),
+        )
+        val seen = mutableListOf<Unit>()
+        backgroundScope.launch { vm.sessionInvalid.collect { seen.add(it) } }
+        vm.start()
+        runCurrent()
+
+        assertThat(seen).hasSize(1)
+    }
+
+    @Test
+    fun `error no-401 en el stream no emite sesion invalida`() = runTest {
+        val (api, _) = okApi()
+        val vm = newViewModel(
+            api,
+            eventStream = ThrowingEventStream(RuntimeException("corte de red")),
+        )
+        val seen = mutableListOf<Unit>()
+        backgroundScope.launch { vm.sessionInvalid.collect { seen.add(it) } }
+        vm.start()
+        runCurrent()
+
+        assertThat(seen).isEmpty()
+    }
+
+    @Test
+    fun `polling primero y luego SSE del mismo cambio no notifica dos veces`() = runTest {
+        var machinesJsonAnswer = machinesJson()
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { respond(machinesJsonAnswer, HttpStatusCode.OK, jsonHeaders()) },
+        )
+        val stream = RecordingEventStream()
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, eventStream = stream, notifier = notifier, pollMs = 30_000L)
+        vm.start()
+        runCurrent()
+
+        // El cambio mcp llega primero por polling.
+        machinesJsonAnswer = """{"machines":[{"id":1,"name":"Desktop","ip":"192.168.1.10","mac":"AA:BB:CC:DD:EE:01","hostname":"desktop","status":"offline","managed":false,"last_origin":"mcp","last_change_at":"2026-09-15T10:05:00+00:00"}]}"""
+        advanceTimeBy(30_000L)
+        runCurrent()
+        assertThat(notifier.notified).hasSize(1)
+
+        // El mismo cambio llega después por SSE (misma marca): no se duplica.
+        stream.events.tryEmit(
+            event(
+                "machine_offline",
+                "Desktop",
+                com.wakemeup.manager.domain.EventOrigin.MCP,
+                timestamp = "2026-09-15T10:05:00+00:00",
+            )
+        )
+        runCurrent()
+
+        assertThat(notifier.notified).hasSize(1)
+    }
+
+    @Test
+    fun `mcp scan_done con maquina guion no notifica`() = runTest {
+        val (api, _) = okApi()
+        val stream = RecordingEventStream()
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, eventStream = stream, notifier = notifier)
+        vm.start()
+        runCurrent()
+
+        stream.events.tryEmit(
+            event("scan_done", "-", com.wakemeup.manager.domain.EventOrigin.MCP)
+        )
+        runCurrent()
+
+        assertThat(notifier.notified).isEmpty()
+    }
+
+    @Test
+    fun `primer poll con mcp historico no notifica y uno mas nuevo si`() = runTest {
+        var machinesJsonAnswer =
+            """{"machines":[{"id":1,"name":"Desktop","ip":"192.168.1.10","mac":"AA:BB:CC:DD:EE:01","hostname":"desktop","status":"offline","managed":false,"last_origin":"mcp","last_change_at":"2026-09-10T08:00:00+00:00"}]}"""
+        val api = WakemeupApi(
+            settings = InMemorySettingsRepository("http://test/api/v1", "t"),
+            client = client { respond(machinesJsonAnswer, HttpStatusCode.OK, jsonHeaders()) },
+        )
+        val notifier = RecordingNotifier()
+        val vm = newViewModel(api, notifier = notifier, pollMs = 30_000L)
+        vm.start()
+        runCurrent()
+
+        // Arranque en frío: el cambio mcp persistido es histórico → no notifica.
+        assertThat(notifier.notified).isEmpty()
+
+        // Un cambio realmente nuevo (más tarde) sí notifica.
+        machinesJsonAnswer =
+            """{"machines":[{"id":1,"name":"Desktop","ip":"192.168.1.10","mac":"AA:BB:CC:DD:EE:01","hostname":"desktop","status":"offline","managed":false,"last_origin":"mcp","last_change_at":"2026-09-15T10:05:00+00:00"}]}"""
+        advanceTimeBy(30_000L)
+        runCurrent()
+
+        assertThat(notifier.notified).hasSize(1)
+        assertThat(notifier.notified[0].machine).isEqualTo("Desktop")
     }
 }
 

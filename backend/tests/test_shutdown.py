@@ -23,7 +23,7 @@ class FakeDb:
     async def get_by_id(self, machine_id: int) -> Machine | None:
         return self._machines.get(machine_id)
 
-    async def set_no_fiable(self, machine_id: int) -> None:
+    async def set_no_fiable(self, machine_id: int, origin: str = "api") -> None:
         self.no_fiable_calls.append(str(machine_id))
 
     async def record_activity(self, channel, token, machine_id, machine_ip, operation, result) -> None:
@@ -38,6 +38,9 @@ class FakeDb:
     async def begin(self) -> None: ...
     async def commit(self) -> None: ...
     async def rollback(self) -> None: ...
+    async def set_last_change(self, machine_id: int, origin: str) -> None:
+        self.last_changes = getattr(self, "last_changes", [])
+        self.last_changes.append((machine_id, origin))
 
 
 class FakeSsh:
@@ -182,3 +185,43 @@ async def test_shutdown_uses_remote_user_from_enrollment():
     svc, db, ssh = _svc()
     await svc.shutdown(1)
     assert ssh.connected == [("192.168.1.11", "maria")]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_emits_event_with_channel_as_origin():
+    """3.1/3.3: el apagado OK emite `shutdown_done` con origen = canal."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    db = FakeDb([_managed()])
+    ssh = FakeSsh()
+    svc = ShutdownService(
+        db=db, ssh=ssh, activity=ActivityService(db),
+        shutdown=ShutdownSettings(), events=bus,
+    )
+    async with bus.subscribe() as queue:
+        await svc.shutdown(1, channel="mcp")
+        event = queue.get_nowait()
+    assert event.type == "shutdown_done"
+    assert event.origin == "mcp"
+    assert db.last_changes == [(1, "mcp")]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_mismatch_emits_no_fiable_event():
+    """3.3: el mismatch de fingerprint emite `machine_no_fiable` con el canal."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    db = FakeDb([_managed()])
+    ssh = FakeSsh(fingerprint="SHA256:otro")
+    svc = ShutdownService(
+        db=db, ssh=ssh, activity=ActivityService(db),
+        shutdown=ShutdownSettings(), events=bus,
+    )
+    async with bus.subscribe() as queue:
+        with pytest.raises(ShutdownError):
+            await svc.shutdown(1, channel="api")
+        event = queue.get_nowait()
+    assert event.type == "machine_no_fiable"
+    assert event.origin == "api"

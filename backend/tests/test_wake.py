@@ -23,6 +23,9 @@ class FakeDb:
     async def begin(self) -> None: ...
     async def commit(self) -> None: ...
     async def rollback(self) -> None: ...
+    async def set_last_change(self, machine_id: int, origin: str) -> None:
+        self.last_changes = getattr(self, "last_changes", [])
+        self.last_changes.append((machine_id, origin))
 
     async def record_activity(self, channel, token, machine_id, machine_ip, operation, result) -> None:
         self.activities.append(
@@ -167,3 +170,20 @@ async def test_wake_no_retry_single_send():
     svc, db, net = _svc(net=OneSendNet(), machines=[_managed(1)])
     await svc.wake(1)
     assert sends == ["aa:bb:cc:dd:ee:01"]
+
+
+@pytest.mark.asyncio
+async def test_wake_emits_event_with_channel_as_origin():
+    """3.1/3.3: el wake emite `wake_sent` con origen = canal (mcp para el agente)."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    db = FakeDb([_managed(1)])
+    svc = WakeService(db=db, net=FakeNet(), activity=ActivityService(db), events=bus)
+    async with bus.subscribe() as queue:
+        await svc.wake(1, channel="mcp")
+        event = queue.get_nowait()
+    assert event.type == "wake_sent"
+    assert event.origin == "mcp"
+    assert event.machine == "pc1"
+    assert db.last_changes == [(1, "mcp")]

@@ -66,4 +66,16 @@
     <string name="settings_error_token_rejected">Token rejected — check your settings</string>
     <string name="settings_error_unreachable">Server unreachable — check the address and your connection</string>
     <string name="machines_open_settings">Open settings</string>
+
+    <!-- AI agent action notifications (epic 3, FR-18). Only mcp origin. -->
+    <string name="agent_notification_channel_name">AI agent actions</string>
+    <string name="agent_notification_channel_description">Alerts when the AI agent controls a machine</string>
+    <string name="agent_notification_body_wake">The agent woke the machine</string>
+    <string name="agent_notification_body_shutdown">The agent shut down the machine</string>
+    <string name="agent_notification_body_generic">The agent performed an action</string>
+    <string name="notification_permission_rationale_title">Turn on notifications</string>
+    <string name="notification_permission_rationale_body">The AI agent acted on a machine. Turn on notifications to know even when you are not looking at the app.</string>
+    <string name="notification_permission_rationale_confirm">Turn on</string>
+    <string name="notification_permission_rationale_cancel">Not now</string>
+    <string name="notification_permission_settings_suggestion">Notifications are off — turn them on in settings for agent alerts</string>
 </resources>

@@ -10,31 +10,49 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from wakemeup.adapters.db import Db
 from wakemeup.adapters.net import Net
 from wakemeup.config import ScanSettings
+from wakemeup.core.models import Event
+from wakemeup.services.activity import ActivityService
+from wakemeup.services.events import EventBus
 
 logger = logging.getLogger(__name__)
+
+ORIGIN_SCAN = "scan"
+ORIGIN_PERIODIC = "periodic"
+ORIGIN_MCP = "mcp"
 
 
 class DiscoveryService:
     """Orquestación del escaneo: ping+ARP → upsert, con singleflight."""
 
-    def __init__(self, net: Net, db: Db, scan: ScanSettings) -> None:
+    def __init__(
+        self, net: Net, db: Db, scan: ScanSettings, events: EventBus | None = None,
+        activity: ActivityService | None = None,
+    ) -> None:
         self._net = net
         self._db = db
         self._scan = scan
+        self._events = events
+        self._activity = activity
         self._lock = asyncio.Lock()
         self._current: asyncio.Task[int] | None = None
         self._in_flight = False
         self._periodic: asyncio.Task | None = None
 
-    async def scan(self) -> int:
+    async def scan(self, origin: str = ORIGIN_SCAN) -> int:
         """Ejecuta un escaneo o se une al escaneo en marcha (singleflight, AD-3).
 
         Devuelve el nº de hosts upserted. Llamadas concurrentes → una sola
         ejecución efectiva: el segundo `scan()` espera y comparte el resultado.
+
+        `origin` (epic 3, AD-11): `scan` para el forzado por API, `mcp` cuando
+        lo pidió el agente y `periodic` en el loop. El evento `scan_done` sale
+        con ese origen (la transición de estado real del host la emite luego el
+        loop de estado con origen `periodic`).
         """
         current = self._current
         if current is not None and not current.done():
@@ -49,7 +67,12 @@ class DiscoveryService:
             current = asyncio.create_task(self._run())
             self._current = current
 
-        return await current
+        result = await current
+        # Solo el iniciador del escaneo persiste y emite `scan_done` (con su
+        # propio origen); las llamadas que se unen al singleflight no lo duplican.
+        await self._record_scan(origin, result)
+        self._publish_scan_done(origin, result)
+        return result
 
     async def _run(self) -> int:
         """Escaneo efectivo del rango configurado + upsert del inventario."""
@@ -68,6 +91,39 @@ class DiscoveryService:
         await self._db.commit()
         logger.info("escaneo completado: %d host(s) en %s", len(hosts), self._scan.range)
         return len(hosts)
+
+    async def _record_scan(self, origin: str, discovered: int) -> None:
+        """Persiste la acción de escaneo en FR-11 con el canal del origen.
+
+        Cada registro abre/cierra transacción explícita (como los demás
+        servicios): un INSERT fuera de transacción deja una implícita abierta y
+        el siguiente `db.begin()` del loop de estado fallaría. El canal es el
+        valor del origen (`scan`/`mcp`/`periodic`).
+        """
+        if self._activity is None:
+            return
+        await self._db.begin()
+        try:
+            await self._activity.record(
+                origin, "-", None, None, "scan", str(discovered)
+            )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
+    def _publish_scan_done(self, origin: str, discovered: int) -> None:
+        """Emite `scan_done` con el origen del disparador (AD-11, epic 3)."""
+        if self._events is None:
+            return
+        self._events.publish(
+            Event(
+                type="scan_done",
+                machine="-",
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                origin=origin,
+            )
+        )
 
     @property
     def in_flight(self) -> bool:
@@ -106,7 +162,7 @@ class DiscoveryService:
             logger.info("loop de escaneo periódico cada %d s", interval)
             while True:
                 try:
-                    await self.scan()
+                    await self.scan(origin=ORIGIN_PERIODIC)
                 except Exception:
                     logger.exception("escaneo periódico falló; reintento en el siguiente tick")
                 await asyncio.sleep(interval)

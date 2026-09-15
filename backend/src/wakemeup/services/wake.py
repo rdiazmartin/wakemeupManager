@@ -13,7 +13,9 @@ import logging
 
 from wakemeup.adapters.db import Db
 from wakemeup.adapters.net import Net, NoWolInterfaceError
+from wakemeup.core.models import Event
 from wakemeup.services.activity import ActivityService
+from wakemeup.services.events import EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +33,13 @@ class WakeError(Exception):
 class WakeService:
     """Wake on LAN: MAC validada + un único magic packet."""
 
-    def __init__(self, db: Db, net: Net, activity: ActivityService) -> None:
+    def __init__(
+        self, db: Db, net: Net, activity: ActivityService, events: EventBus | None = None
+    ) -> None:
         self._db = db
         self._net = net
         self._activity = activity
+        self._events = events
 
     async def wake(
         self, machine_id: int, channel: str = "api", token: str = "-"
@@ -73,22 +78,52 @@ class WakeService:
             # warning queda en el log (nunca 5xx; la confirmación llega del estado).
             logger.warning("wake de %s no emitido (%s); éxito degradado", machine.ip, exc)
             result = "ok_degraded"
-        await self._record(channel, token, "wake", machine, result)
+        await self._record(channel, token, "wake", machine, result, stamp_origin=True)
+        self._publish(channel, "wake_sent", machine)
         logger.info("wake enviado a %s (id %d)", machine.ip, machine_id)
         return {"ok": True}
 
-    async def _record(self, channel: str, token: str, operation: str, machine, result: str) -> None:
+    def _publish(self, channel: str, event_type: str, machine) -> None:
+        """Emite el evento del bus con el origen del canal (AD-11, epic 3).
+
+        `wake_machine` del MCP emite `wake_sent` con origen `mcp` (la app
+        notifica "El agente IA encendió la máquina"); la transición real
+        offline→online posterior la emite el loop de estado como `periodic`.
+        """
+        if self._events is None:
+            return
+        from datetime import datetime, timezone
+
+        self._events.publish(
+            Event(
+                type=event_type,
+                machine=machine.hostname or machine.ip,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                origin=channel,
+                machine_id=machine.id,
+                machine_ip=machine.ip,
+            )
+        )
+
+    async def _record(
+        self, channel: str, token: str, operation: str, machine, result: str,
+        stamp_origin: bool = False,
+    ) -> None:
         """Registra la entrada de actividad en su propia transacción (FR-11).
 
         Cada registro abre/cierra transacción explícita (como los caminos de
         éxito): un INSERT fuera de transacción deja implícita abierta y el
-        siguiente `db.begin()` del loop de estado fallaría.
+        siguiente `db.begin()` del loop de estado fallaría. `stamp_origin`
+        persiste el origen del canal como último cambio (fallback de polling,
+        FR-18), en la misma transacción.
         """
         await self._db.begin()
         try:
             await self._db.record_activity(
                 channel, token, machine.id, machine.ip, operation, result
             )
+            if stamp_origin:
+                await self._db.set_last_change(machine.id, channel)
             await self._db.commit()
         except Exception:
             await self._db.rollback()

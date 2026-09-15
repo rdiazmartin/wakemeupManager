@@ -87,9 +87,51 @@ async def test_list_shows_active_and_revoked(db, capsys):
     await _async_main(["token", "list"])
     out, _ = _capture_stdout(capsys)
     lines = [l for l in out.splitlines() if l]
-    by_name = {l.split("\t")[0]: l.split("\t")[1] for l in lines}
+    by_name = {l.split("\t")[0]: l.split("\t")[2] for l in lines}
     assert by_name.get("activo") == "activo"
     assert by_name.get("revocado") == "revocado"
+
+
+async def test_create_token_kind_defaults_device(db, capsys):
+    """3.2: `token create` sin --kind crea un token de dispositivo."""
+    assert await _async_main(["token", "create", "movil"]) == 0
+    tok = [t for t in await db.list_tokens() if t.device_name == "movil"][0]
+    assert tok.kind == "device"
+
+
+async def test_create_token_kind_mcp(db, capsys):
+    """3.2: `token create --kind mcp` crea el token dedicado del agente."""
+    assert await _async_main(["token", "create", "--kind", "mcp", "agente"]) == 0
+    tok = [t for t in await db.list_tokens() if t.device_name == "agente"][0]
+    assert tok.kind == "mcp"
+    # El token MCP no vale como token de dispositivo (FR-10b).
+    assert await db.token_exists(tok.token_sha256, kind="device") is False
+    assert await db.token_exists(tok.token_sha256, kind="mcp") is True
+
+
+async def test_list_shows_kind(db, capsys):
+    """3.2: `token list` muestra el tipo de cada token."""
+    await db.create_token("movil", sha256_hex_lower("a" * 64), kind="device")
+    await db.create_token("agente", sha256_hex_lower("b" * 64), kind="mcp")
+    await db.commit()
+    await _async_main(["token", "list"])
+    out, _ = _capture_stdout(capsys)
+    rows = {l.split("\t")[0]: l.split("\t")[1] for l in out.splitlines() if l}
+    assert rows["movil"] == "device"
+    assert rows["agente"] == "mcp"
+
+
+async def test_revoke_mcp_token_does_not_affect_device(db):
+    """3.2: revocar el token MCP no toca los tokens de dispositivo."""
+    device = "d" * 64
+    mcp = "e" * 64
+    await db.create_token("movil", sha256_hex_lower(device), kind="device")
+    await db.create_token("agente", sha256_hex_lower(mcp), kind="mcp")
+    await db.commit()
+    assert await db.revoke_token_by_name("agente") is True
+    await db.commit()
+    assert await db.token_exists(sha256_hex_lower(device), kind="device") is True
+    assert await db.token_exists(sha256_hex_lower(mcp), kind="mcp") is False
 
 
 async def test_cli_uses_db_path_from_settings(tmp_path, monkeypatch, capsys):
@@ -129,12 +171,14 @@ async def test_init_db_migrates_legacy_1_2_db(tmp_path):
 
     rows = await db._conn.execute_fetchall("PRAGMA table_info(machines);")
     cols = {r[1] for r in rows}
-    assert {"state", "status_checked_at", "fingerprint", "remote_user"} <= cols
+    assert {"state", "status_checked_at", "fingerprint", "remote_user", "last_origin", "last_change_at"} <= cols
 
     tok_rows = await db._conn.execute_fetchall(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='tokens';"
     )
     assert len(tok_rows) == 1
+    token_cols = {r[1] for r in await db._conn.execute_fetchall("PRAGMA table_info(tokens);")}
+    assert "kind" in token_cols
     for table in ("keys", "activity_log"):
         trows = await db._conn.execute_fetchall(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?;", (table,)
@@ -154,6 +198,9 @@ async def test_init_db_migrates_legacy_1_2_db(tmp_path):
     await db.create_token("post-migra", sha256_hex_lower(token))
     await db.commit()
     assert await db.token_exists(sha256_hex_lower(token)) is True
+    # El token creado sin kind queda como dispositivo por el default de columna.
+    migrated_tok = [t for t in await db.list_tokens() if t.device_name == "post-migra"][0]
+    assert migrated_tok.kind == "device"
 
     # El epic 2 funciona sobre la DB migrada: alta + registro de actividad.
     await db.set_managed(1, "SHA256:abcd", "maria")

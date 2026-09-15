@@ -86,6 +86,57 @@ def test_ssh_and_shutdown_sections_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     assert settings.shutdown.command == "sudo -n systemctl poweroff"
 
 
+def test_api_section_defaults_and_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Epic 3: `[api]` (bind/port/prefix) se parsea para el guard solo-tailnet."""
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: "/nonexistent/config.toml")
+    settings = Settings()
+    assert settings.api.bind_hosts == ["127.0.0.1"]
+    assert settings.api.port == 8080
+    assert settings.api.prefix == "/api/v1"
+
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        "[api]\n"
+        'bind_hosts = ["100.100.100.1", "127.0.0.1"]\n'
+        "port = 9000\n"
+        'prefix = "/api/v1"\n'
+    )
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: str(toml))
+    settings = Settings()
+    assert settings.api.bind_hosts == ["100.100.100.1", "127.0.0.1"]
+    assert settings.api.port == 9000
+
+
+def test_transport_security_allowlist_default_and_ipv6(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Epic 3: el allowlist del MCP incluye loopback y los `bind_hosts`.
+
+    Un `bind_hosts` IPv6 debe ir con corchetes (`[fd7a::1]:*`); sin ellos el
+    patrón es malformado y el `Host` header nunca casaría.
+    """
+    from wakemeup.api import _build_transport_security
+
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: "/nonexistent/config.toml")
+    security = _build_transport_security()
+    assert security.enable_dns_rebinding_protection is True
+    assert "127.0.0.1:*" in security.allowed_hosts
+    assert "localhost:*" in security.allowed_hosts
+    assert "[::1]:*" in security.allowed_hosts
+    assert "127.0.0.1:*" in security.allowed_hosts  # bind_hosts default
+
+    toml = tmp_path / "config.toml"
+    toml.write_text(
+        "[api]\n"
+        'bind_hosts = ["fd7a:115c:a1e0::1", "100.100.100.1"]\n'
+    )
+    monkeypatch.setattr("wakemeup.config.default_config_path", lambda: str(toml))
+    security = _build_transport_security()
+    assert "[fd7a:115c:a1e0::1]:*" in security.allowed_hosts
+    assert "100.100.100.1:*" in security.allowed_hosts
+    assert "fd7a:115c:a1e0::1:*" not in security.allowed_hosts
+
+
 def test_ssh_and_shutdown_toml_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     toml = tmp_path / "config.toml"
     toml.write_text(

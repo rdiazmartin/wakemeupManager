@@ -93,12 +93,16 @@ class AuthService:
             return path.rstrip("/") in _EXEMPT_GET_PATHS
         return False
 
-    async def authenticate(self, token: str | None, ip: str) -> bool:
-        """¿Es válido este token desde esta IP?
+    async def authenticate(self, token: str | None, ip: str, kind: str = "device") -> bool:
+        """¿Es válido este token (`kind`) desde esta IP?
 
         No distingue token ausente vs inválido (mismo 401) para no oracular
         la existencia de tokens (FR-10). Los contadores de backoff usan la IP
         y el HASH del token (nunca el token plano: FR-11/AD-6).
+
+        `kind` (epic 3, FR-10b): el middleware de dispositivo exige
+        `device` (default, no rompe llamadas) y el auth del MCP exige `mcp`;
+        un token de un tipo no vale en la superficie del otro.
         """
         digest = sha256_hex_lower(token) if token is not None else None
         blocked = self.backoff.is_blocked(ip) or (
@@ -109,8 +113,8 @@ class AuthService:
         if digest is None:
             self.backoff.record_failure(ip)
             return False
-        if not await self._db.token_exists(digest):
-            logger.info("token inválido o revocado (origen %s)", ip)
+        if not await self._db.token_exists(digest, kind):
+            logger.info("token %s inválido o revocado (origen %s)", kind, ip)
             self.backoff.record_failure(ip)
             self.backoff.record_failure(digest)
             return False

@@ -9,7 +9,7 @@ import socket
 
 import pytest
 
-from wakemeup.adapters.net import Net, _PingOutcome
+from wakemeup.adapters.net import Net, _PingOutcome, is_trusted_client
 
 RANGE = "192.168.1.0/29"  # hosts .1–.6
 OWN_IP = "192.168.1.3"
@@ -436,3 +436,30 @@ async def test_send_wol_invalid_mac_raises_value_error(monkeypatch):
     net = Net()
     with pytest.raises(ValueError):
         await net.send_wol("zz:zz:zz:zz:zz:zz")
+
+
+# --- is_trusted_client (3.2: guard solo tailnet+loopback del MCP) ---
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "127.1.2.3",  # todo 127.0.0.0/8
+        "::1",  # loopback IPv6
+        "::ffff:127.0.0.1",  # IPv4-mapped (cliente dual-stack por loopback)
+        "100.100.100.5",  # tailnet IPv4
+        "fd7a:115c:a1e0::5",  # tailnet IPv6
+        "[::1]",  # forma con corchetes
+    ],
+)
+def test_is_trusted_client_accepts_loopback_and_tailnet(host):
+    assert is_trusted_client(host) is True
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["192.168.1.50", "8.8.8.8", "203.0.113.9", "::ffff:192.168.1.50", "no-es-ip", "", None],
+)
+def test_is_trusted_client_rejects_physical_lan_and_public(host):
+    assert is_trusted_client(host) is False

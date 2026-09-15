@@ -225,6 +225,24 @@ async def test_enroll_password_discarded_after_failure():
 
 
 @pytest.mark.asyncio
+async def test_enroll_emits_event_with_channel_as_origin():
+    """3.1/3.3: el alta emite `enroll_done` con origen = canal."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    db = FakeDb([Machine(id=1, ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10", hostname="pc")])
+    svc = EnrollmentService(
+        db=db, net=FakeNet(), ssh=FakeSsh(), activity=ActivityService(db), events=bus
+    )
+    async with bus.subscribe() as queue:
+        await svc.enroll(1, "maria", "s3cr3t", channel="api")
+        event = queue.get_nowait()
+    assert event.type == "enroll_done"
+    assert event.origin == "api"
+    assert event.machine == "pc"
+
+
+@pytest.mark.asyncio
 async def test_activity_shape_has_no_password():
     """2.5: la entrada de actividad tiene el shape FR-11 sin passwords."""
     entry = db_activity = None

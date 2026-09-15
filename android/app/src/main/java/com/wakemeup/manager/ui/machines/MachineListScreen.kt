@@ -95,7 +95,12 @@ fun MachineListScreen(
         val fallbackApi = remember {
             WakemeupApi(SettingsRepository.secure(fallbackContext))
         }
-        viewModel(factory = MachineListViewModel.createFactory(api = fallbackApi))
+        viewModel(
+            factory = MachineListViewModel.createFactory(
+                api = fallbackApi,
+                notifier = com.wakemeup.manager.notifications.AndroidMachineNotifier(fallbackContext),
+            ),
+        )
     } else {
         viewModel
     }

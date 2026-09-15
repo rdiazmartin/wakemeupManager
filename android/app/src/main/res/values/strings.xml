@@ -66,4 +66,16 @@
     <string name="settings_error_token_rejected">Token rechazado — revisa los ajustes</string>
     <string name="settings_error_unreachable">BE inalcanzable — revisa la dirección y tu conexión</string>
     <string name="machines_open_settings">Abrir ajustes</string>
+
+    <!-- Notificación de acciones del agente IA (epic 3, FR-18). Solo origen mcp. -->
+    <string name="agent_notification_channel_name">Acciones del agente IA</string>
+    <string name="agent_notification_channel_description">Avisos cuando el agente IA controla una máquina</string>
+    <string name="agent_notification_body_wake">El agente encendió la máquina</string>
+    <string name="agent_notification_body_shutdown">El agente apagó la máquina</string>
+    <string name="agent_notification_body_generic">El agente realizó una acción</string>
+    <string name="notification_permission_rationale_title">Activar notificaciones</string>
+    <string name="notification_permission_rationale_body">El agente IA ha actuado sobre una máquina. Activa las notificaciones para enterarte aunque no estés mirando la app.</string>
+    <string name="notification_permission_rationale_confirm">Activar</string>
+    <string name="notification_permission_rationale_cancel">Ahora no</string>
+    <string name="notification_permission_settings_suggestion">Notificaciones desactivadas — actívalas en ajustes para avisos del agente</string>
 </resources>

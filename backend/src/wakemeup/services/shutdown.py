@@ -16,7 +16,9 @@ import logging
 from wakemeup.adapters.db import Db
 from wakemeup.adapters.ssh import Ssh, SshError
 from wakemeup.config import ShutdownSettings
+from wakemeup.core.models import Event
 from wakemeup.services.activity import ActivityService
+from wakemeup.services.events import EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +42,13 @@ class ShutdownService:
         ssh: Ssh,
         activity: ActivityService,
         shutdown: ShutdownSettings,
+        events: EventBus | None = None,
     ) -> None:
         self._db = db
         self._ssh = ssh
         self._activity = activity
         self._shutdown = shutdown
+        self._events = events
 
     async def shutdown(self, machine_id: int, channel: str = "api", token: str = "-") -> dict:
         """Apaga la máquina tras verificar el fingerprint; devuelve `{"ok": true}`."""
@@ -71,12 +75,13 @@ class ShutdownService:
                 )
                 await self._db.begin()
                 try:
-                    await self._db.set_no_fiable(machine_id)
+                    await self._db.set_no_fiable(machine_id, origin=channel)
                     await self._record_in_tx(channel, token, machine, "shutdown", "fingerprint_mismatch")
                     await self._db.commit()
                 except Exception:
                     await self._db.rollback()
                     raise
+                self._publish(channel, "machine_no_fiable", machine)
                 raise ShutdownError(
                     409,
                     "el host no coincide con el fingerprint fijado; máquina marcada no_fiable",
@@ -93,9 +98,27 @@ class ShutdownService:
             if connection is not None:
                 await self._ssh.close(connection)
 
-        await self._record(channel, token, machine, "shutdown", "ok")
+        await self._record(channel, token, machine, "shutdown", "ok", stamp_origin=True)
+        self._publish(channel, "shutdown_done", machine)
         logger.info("shutdown enviado a %s (id %d)", machine.ip, machine_id)
         return {"ok": True}
+
+    def _publish(self, channel: str, event_type: str, machine) -> None:
+        """Emite el evento del bus con el origen del canal (AD-11, epic 3)."""
+        if self._events is None:
+            return
+        from datetime import datetime, timezone
+
+        self._events.publish(
+            Event(
+                type=event_type,
+                machine=machine.hostname or machine.ip,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                origin=channel,
+                machine_id=machine.id,
+                machine_ip=machine.ip,
+            )
+        )
 
     async def _record_in_tx(self, channel: str, token: str, machine, operation: str, result: str) -> None:
         """Registro dentro de la transacción YA abierta por el llamador."""
@@ -103,18 +126,24 @@ class ShutdownService:
             channel, token, machine.id, machine.ip, operation, result
         )
 
-    async def _record(self, channel: str, token: str, machine, operation: str, result: str) -> None:
+    async def _record(
+        self, channel: str, token: str, machine, operation: str, result: str,
+        stamp_origin: bool = False,
+    ) -> None:
         """Registra la entrada de actividad en su propia transacción (FR-11).
 
         Cada registro abre/cierra transacción explícita (como los caminos de
         éxito): un INSERT fuera de transacción deja implícita abierta y el
-        siguiente `db.begin()` del loop de estado fallaría.
+        siguiente `db.begin()` del loop de estado fallaría. `stamp_origin`
+        persiste el origen del canal como último cambio (FR-18, polling).
         """
         await self._db.begin()
         try:
             await self._db.record_activity(
                 channel, token, machine.id, machine.ip, operation, result
             )
+            if stamp_origin:
+                await self._db.set_last_change(machine.id, channel)
             await self._db.commit()
         except Exception:
             await self._db.rollback()

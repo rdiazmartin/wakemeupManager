@@ -19,7 +19,9 @@ path = "wakemeup.db"
 
 [api]
 # Interfaz a la que se vincula el BE (FR-9, AD-6): solo tailnet + loopback.
-# P. ej. "100.100.100.1,127.0.0.1".
+# P. ej. ["100.100.100.1", "127.0.0.1"]. El bind real de uvicorn se integra
+# en la story 4.1; hoy esta sección también alimenta el guard solo-tailnet
+# del servidor MCP (AD-12, epic 3).
 bind_hosts = ["127.0.0.1"]
 port = 8080
 # Prefijo de los endpoints REST (AD-1).

@@ -23,3 +23,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-2-epic-2-enciende-y-apaga.md`
   summary: Sin vía de recovery para no_fiable: re-enroll devuelve 409 y no hay CLI/API para re-fijar el fingerprint ni borrar la marca.
   evidence: Revisión del epic 2 (blind-hunter): el estado lo crea el propio sistema (AD-2) y su única salida es la edición manual de la DB; requiere diseño (CLI re-enroll o UI de re-alta) fuera del AC.
+- source_spec: `_bmad-output/implementation-artifacts/spec-3-epic-3-mcp-y-eventos.md`
+  summary: La notificación del fallback de polling usa el cuerpo genérico ("El agente realizó una acción") porque el BE solo expone `last_origin`, no la acción del último cambio.
+  evidence: Revisión del epic 3 (blind-hunter): `notifyPolledMcpChanges` sintetiza `type="machine_change"` (→ `EventAction.UNKNOWN` → cuerpo genérico). Con el stream caído, un shutdown del agente notificaría "realizó una acción" en vez de "apagó la máquina". Fix completo = añadir `last_action`/tipo del último cambio al DTO de `GET /machines` (aditivo, AD-10) para conservar la semántica en el fallback.
+- source_spec: `_bmad-output/implementation-artifacts/spec-3-epic-3-mcp-y-eventos.md`
+  summary: El camino de `MachineListScreen` sin ViewModel construye el notificador pero no compone el colector de prompts de permiso, así que un prompt `POST_NOTIFICATIONS` se pierde en esa rama.
+  evidence: Revisión del epic 3 (edge-case): `MachineListScreen.kt` fallback crea `AndroidMachineNotifier` sin `NotificationPermissionHost`; hoy no es alcanzable en producción (MainActivity siempre pasa ViewModel), pero es un footgun latente si se usa el fallback. Fix = factorizar el host de permiso para ambas vías o eliminar el fallback sin notificador.
+- source_spec: `_bmad-output/implementation-artifacts/spec-3-epic-3-mcp-y-eventos.md`
+  summary: El allowlist de `TransportSecuritySettings` solo admite hosts de `[api] bind_hosts` y loopback; los nombres MagicDNS de la tailnet no están contemplados.
+  evidence: Revisión del epic 3 (blind-hunter/edge-case): el SDK valida el header `Host`; si un cliente MCP usa el nombre MagicDNS de la tailnet en lugar de la IP, se rechazaría. Se decide con el bind real de uvicorn en la story 4.1.

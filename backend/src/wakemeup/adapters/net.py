@@ -43,9 +43,34 @@ class NoWolInterfaceError(RuntimeError):
 # (AD-3: excluir tailnet y loopback, y cualquier dirección no-LAN).
 _OWN_SUBNETS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("100.64.0.0/10"),
     ipaddress.ip_network("fd7a:115c:a1e0::/48"),
 )
+
+
+def is_trusted_client(host: str | None) -> bool:
+    """¿Procede la IP de loopback o de la tailnet? (AD-6/AD-12, epic 3).
+
+    El servidor MCP solo es alcanzable desde loopback + tailnet (`127.0.0.0/8`,
+    `::1/128`, `100.64.0.0/10`, `fd7a:115c:a1e0::/48`), nunca desde la LAN
+    física ni fuera de la VPN (NFR-1). Reutiliza el criterio de rangos de
+    `_OWN_SUBNETS`. Las direcciones IPv4-mapped (`::ffff:127.0.0.1`, que usan
+    los clientes dual-stack al conectar por loopback) se normalizan a su forma
+    IPv4 antes de comparar. Una IP desconocida o no parseable → no fiable.
+    """
+    if not host:
+        return False
+    candidate = host.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return any(addr in subnet for subnet in _OWN_SUBNETS if subnet.version == addr.version)
 
 
 @dataclass(frozen=True)

@@ -18,7 +18,14 @@ enum class MachineStatus {
     }
 }
 
-/** Máquina del inventario expuesto por `GET /api/v1/machines` (contrato 1.4). */
+/**
+ * Máquina del inventario expuesto por `GET /api/v1/machines` (contrato 1.4).
+ *
+ * Epic 3 añade de forma ADITIVA `lastOrigin`/`lastChangeAt` (nullable) para el
+ * fallback de notificación por polling cuando el stream SSE está caído: el BE
+ * persiste el origen del último cambio de estado (`mcp` dispara notificación).
+ * Los defaults mantienen intactos los consumidores existentes (AD-10).
+ */
 data class Machine(
     val id: Int,
     val name: String,
@@ -27,6 +34,8 @@ data class Machine(
     val hostname: String?,
     val status: MachineStatus,
     val managed: Boolean,
+    val lastOrigin: EventOrigin? = null,
+    val lastChangeAt: String? = null,
 )
 
 /**

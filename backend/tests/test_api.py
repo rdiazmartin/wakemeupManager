@@ -28,6 +28,7 @@ class FakeDb:
 
     def __init__(self) -> None:
         self.tokens: dict[str, str] = {}  # sha256 -> device_name (activo)
+        self.token_kinds: dict[str, str] = {}  # sha256 -> kind
         self.revoked: set[str] = set()
         self.machines: list[tuple[str, str, str, str, str | None, str | None]] = []
         # (ip, mac, hostname, state, fingerprint, remote_user)
@@ -40,11 +41,16 @@ class FakeDb:
     async def close(self) -> None:
         pass
 
-    async def token_exists(self, sha: str) -> bool:
-        return sha in self.tokens and sha not in self.revoked
+    async def token_exists(self, sha: str, kind: str = "device") -> bool:
+        return (
+            self.tokens.get(sha) is not None
+            and self.token_kinds.get(sha, "device") == kind
+            and sha not in self.revoked
+        )
 
-    async def create_token(self, device_name: str, sha: str) -> None:
+    async def create_token(self, device_name: str, sha: str, kind: str = "device") -> None:
         self.tokens[sha] = device_name
+        self.token_kinds[sha] = kind
 
     async def revoke_token(self, sha: str) -> bool:
         if sha in self.tokens and sha not in self.revoked:
@@ -127,13 +133,15 @@ class FakeDiscovery:
         self.task: asyncio.Task | None = None
         self.scan_calls = 0
         self.duration_ms = 7
+        self.scan_origins: list[str] = []
 
     @property
     def current_task(self):
         return self.task
 
-    async def scan(self) -> int:
+    async def scan(self, origin: str = "scan") -> int:
         self.scan_calls += 1
+        self.scan_origins.append(origin)
         return 3
 
 
@@ -150,7 +158,8 @@ class FakeStatus:
             Machine(
                 id=m["id"], ip=m["ip"], mac=m.get("mac"), hostname=m.get("hostname"),
                 state=m.get("state", "offline"), fingerprint=m.get("fingerprint"),
-                remote_user=m.get("remote_user"),
+                remote_user=m.get("remote_user"), last_origin=m.get("last_origin"),
+                last_change_at=m.get("last_change_at"),
             )
             for m in self._machines
         ]
@@ -164,8 +173,10 @@ class FastAuthService(AuthService):
         self._db = db
 
 
-def _register_token(db: FakeDb, token: str) -> None:
-    db.tokens[sha256_hex_lower(token)] = "test-device"
+def _register_token(db: FakeDb, token: str, kind: str = "device") -> None:
+    digest = sha256_hex_lower(token)
+    db.tokens[digest] = "test-device"
+    db.token_kinds[digest] = kind
 
 
 @pytest.fixture
@@ -214,6 +225,23 @@ def api_env(monkeypatch):
         async def list(self, limit=20):
             return []
 
+    class FakeEvents:
+        """Bus de eventos sustituible (registra los publicados)."""
+
+        def __init__(self) -> None:
+            self.published: list = []
+            self.subscriber_count = 0
+            self.running = False
+
+        def publish(self, event) -> None:
+            self.published.append(event)
+
+        def start(self) -> None:
+            self.running = True
+
+        def stop(self) -> None:
+            self.running = False
+
     class _BoomEnroll:
         async def enroll(self, *a, **kw):
             raise RuntimeError("boom enroll")
@@ -222,6 +250,7 @@ def api_env(monkeypatch):
     from wakemeup.services.wake import WakeError as _WakeErr
     from wakemeup.services.shutdown import ShutdownError as _SDErr
 
+    events = FakeEvents()
     monkeypatch.setattr(app, "db", db)
     monkeypatch.setattr(app, "net", net)
     monkeypatch.setattr(app, "discovery", discovery)
@@ -231,10 +260,14 @@ def api_env(monkeypatch):
     monkeypatch.setattr(app, "wake", FakeWake(net))
     monkeypatch.setattr(app, "shutdown", FakeShutdown())
     monkeypatch.setattr(app, "activity", FakeActivity())
+    monkeypatch.setattr(app, "events", events)
 
     token = new_device_token()
     _register_token(db, token)  # programamos el token sin tocar un loop real
-    return {"client": TestClient(app), "token": token, "db": db, "auth": auth, "status": status, "discovery": discovery}
+    return {
+        "client": TestClient(app), "token": token, "db": db, "auth": auth,
+        "status": status, "discovery": discovery, "events": events,
+    }
 
 
 def _auth_header(token: str) -> dict:
@@ -585,14 +618,45 @@ def test_get_machines_managed_derived_from_fingerprint(api_env):
     assert body[1]["status"] == "no_fiable"
 
 
+def test_get_machines_dto_includes_last_origin_additively(api_env):
+    """3.3: el DTO añade `last_origin`/`last_change_at` sin romper AD-10."""
+    api_env["status"]._machines = [
+        {"id": 1, "ip": "192.168.1.10", "mac": "aa:bb:cc:dd:ee:10", "hostname": "pc",
+         "state": "online", "fingerprint": "SHA256:abcd", "remote_user": "maria",
+         "last_origin": "mcp", "last_change_at": "2026-09-15T10:00:00+00:00"},
+    ]
+    resp = api_env["client"].get("/api/v1/machines", headers=_auth_header(api_env["token"]))
+    assert resp.status_code == 200
+    m = resp.json()["machines"][0]
+    # Campos de AD-10 intactos.
+    assert {"id", "name", "ip", "mac", "hostname", "status", "managed"} <= set(m)
+    # Campos aditivos del epic 3.
+    assert m["last_origin"] == "mcp"
+    assert m["last_change_at"] == "2026-09-15T10:00:00+00:00"
+
+
+def test_scan_emits_scan_origin(api_env):
+    """3.3: el escaneo forzado por API pasa `origin='scan'` al servicio."""
+    api_env["client"].post("/api/v1/scan", headers=_auth_header(api_env["token"]))
+    assert api_env["discovery"].scan_origins == ["scan"]
+
+
+def test_events_requires_device_token(api_env):
+    """SSE: sin token → 401 (Bearer de dispositivo obligatorio)."""
+    resp = api_env["client"].get("/api/v1/events")
+    assert resp.status_code == 401
+
+
 def test_lifespan_starts_periodic_loops():
     """AC: al arrancar la app (lifespan), periodic_task y check_cycle están en marcha.
 
     El lifespan consume el grafo expuesto en `app.*` y espera a las tasks
-    periódicas (canceladas) antes de cerrar la DB.
+    periódicas (canceladas) antes de cerrar la DB; también arranca el bus de
+    eventos y la sesión MCP (cuyo submount no ejecuta lifespan propio).
     """
-    from wakemeup.api import _lifespan
     import asyncio as _a
+
+    from wakemeup.api import create_app
 
     async def cancelled_task():
         await _a.sleep(3600)
@@ -629,22 +693,31 @@ def test_lifespan_starts_periodic_loops():
 
         async def close(self) -> None: ...
 
-    events: list[str] = []
+    class FakeEvents2:
+        def __init__(self) -> None:
+            self.started = False
+            self.stopped = False
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    events_bus = FakeEvents2()
+    seen: list[str] = []
+    services = {
+        "db": FakeDb2(), "net": None, "discovery": FakeDiscovery2(),
+        "status": FakeStatus2(), "auth": None, "enrollment": None,
+        "wake": None, "shutdown": None, "activity": None, "events": events_bus,
+    }
+    test_app = create_app(services)
 
     async def run():
-        old = (
-            app.db, app.net, app.discovery, app.status, app.auth,
-        )
-        app.db, app.net, app.discovery, app.status, app.auth = (
-            FakeDb2(), None, FakeDiscovery2(), FakeStatus2(), None,
-        )
-        try:
-            from wakemeup.api import _lifespan as lf
-
-            async with lf(app):
-                events.append("inside")
-        finally:
-            app.db, app.net, app.discovery, app.status, app.auth = old
+        async with test_app.router.lifespan_context(test_app):
+            seen.append("inside")
+            assert events_bus.started is True
 
     _a.run(run())  # pytest-asyncio mode=auto: loop propio en este test
-    assert events == ["inside"]
+    assert seen == ["inside"]
+    assert events_bus.stopped is True

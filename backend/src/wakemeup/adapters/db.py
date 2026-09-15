@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS machines (
     status_checked_at TEXT,
     fingerprint TEXT,
     remote_user TEXT,
+    last_origin TEXT,
+    last_change_at TEXT,
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tokens (
@@ -36,7 +38,8 @@ CREATE TABLE IF NOT EXISTS tokens (
     device_name TEXT NOT NULL UNIQUE,
     token_sha256 TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
-    revoked_at TEXT
+    revoked_at TEXT,
+    kind TEXT NOT NULL DEFAULT 'device'
 );
 CREATE TABLE IF NOT EXISTS keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +68,14 @@ _COLUMN_MIGRATIONS = {
     "status_checked_at": "ALTER TABLE machines ADD COLUMN status_checked_at TEXT;",
     "fingerprint": "ALTER TABLE machines ADD COLUMN fingerprint TEXT;",
     "remote_user": "ALTER TABLE machines ADD COLUMN remote_user TEXT;",
+    "last_origin": "ALTER TABLE machines ADD COLUMN last_origin TEXT;",
+    "last_change_at": "ALTER TABLE machines ADD COLUMN last_change_at TEXT;",
+}
+
+# Columnas de `tokens` que faltan en DBs anteriores al epic 3 (discriminador
+# `kind`, FR-10b). Se aplica igual que `_COLUMN_MIGRATIONS` pero sobre `tokens`.
+_TOKEN_COLUMN_MIGRATIONS = {
+    "kind": "ALTER TABLE tokens ADD COLUMN kind TEXT NOT NULL DEFAULT 'device';",
 }
 
 _UPSERT = """
@@ -76,30 +87,47 @@ ON CONFLICT(ip) DO UPDATE SET
     updated_at = excluded.updated_at;
 """
 
+# `last_origin`/`last_change_at` solo se actualizan cuando el estado CAMBIA
+# (comparado con el valor previo de la fila, que SQLite expone sin actualizar en
+# SET). Así un cambio de origen `mcp` no lo pisa el siguiente barrido periódico
+# sin transición (fallback de notificación por polling de la app, 3.5).
 _UPSERT_STATUS = """
-UPDATE machines SET state = ?, status_checked_at = ?
+UPDATE machines
+SET state = ?, status_checked_at = ?,
+    last_origin = CASE WHEN state != ? THEN ? ELSE last_origin END,
+    last_change_at = CASE WHEN state != ? THEN ? ELSE last_change_at END
 WHERE ip = ? AND state != 'no_fiable';
 """
 
 _LIST = (
-    "SELECT id, ip, mac, hostname, state, status_checked_at, fingerprint, remote_user "
-    "FROM machines ORDER BY id;"
+    "SELECT id, ip, mac, hostname, state, status_checked_at, fingerprint, remote_user, "
+    "last_origin, last_change_at FROM machines ORDER BY id;"
 )
 
 _GET_STATUS = "SELECT state, status_checked_at FROM machines WHERE ip = ?;"
 
 _GET_BY_ID = (
-    "SELECT id, ip, mac, hostname, state, status_checked_at, fingerprint, remote_user "
-    "FROM machines WHERE id = ?;"
+    "SELECT id, ip, mac, hostname, state, status_checked_at, fingerprint, remote_user, "
+    "last_origin, last_change_at FROM machines WHERE id = ?;"
 )
 
 _SET_MANAGED = (
     "UPDATE machines SET fingerprint = ?, remote_user = ?, updated_at = ? WHERE id = ?;"
 )
 
-_SET_NO_FIABLE = "UPDATE machines SET state = 'no_fiable', updated_at = ? WHERE id = ?;"
+_SET_NO_FIABLE = (
+    "UPDATE machines SET state = 'no_fiable', updated_at = ?, "
+    "last_origin = ?, last_change_at = ? WHERE id = ?;"
+)
 
-_SET_STATE = "UPDATE machines SET state = ?, updated_at = ? WHERE id = ?;"
+_SET_STATE = (
+    "UPDATE machines SET state = ?, updated_at = ?, last_origin = ?, last_change_at = ? "
+    "WHERE id = ?;"
+)
+
+_SET_LAST_CHANGE = (
+    "UPDATE machines SET last_origin = ?, last_change_at = ? WHERE id = ?;"
+)
 
 _INSERT_KEY = (
     "INSERT INTO keys (machine_id, algorithm, fingerprint_sha256, installed, created_at) "
@@ -120,15 +148,23 @@ _LIST_ACTIVITY = (
 
 _ACTIVITY_STAT = "SELECT operation, result, COUNT(*) FROM activity_log GROUP BY operation, result ORDER BY operation;"
 
-_INSERT_TOKEN = "INSERT INTO tokens (device_name, token_sha256, created_at, revoked_at) VALUES (?, ?, ?, ?);"
+_INSERT_TOKEN = (
+    "INSERT INTO tokens (device_name, token_sha256, created_at, revoked_at, kind) "
+    "VALUES (?, ?, ?, ?, ?);"
+)
 
-_TOKEN_EXISTS = "SELECT 1 FROM tokens WHERE token_sha256 = ? AND revoked_at IS NULL;"
+_TOKEN_EXISTS = (
+    "SELECT 1 FROM tokens WHERE token_sha256 = ? AND kind = ? AND revoked_at IS NULL;"
+)
 
 _REVOKE_TOKEN = "UPDATE tokens SET revoked_at = ? WHERE token_sha256 = ? AND revoked_at IS NULL;"
 
 _REVOKE_TOKEN_NAME = "UPDATE tokens SET revoked_at = ? WHERE device_name = ? AND revoked_at IS NULL;"
 
-_LIST_TOKENS = "SELECT id, device_name, token_sha256, created_at, revoked_at FROM tokens ORDER BY id;"
+_LIST_TOKENS = (
+    "SELECT id, device_name, token_sha256, created_at, revoked_at, kind "
+    "FROM tokens ORDER BY id;"
+)
 
 
 class Db:
@@ -159,6 +195,7 @@ class Db:
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
         await self._migrate_machines()
+        await self._migrate_tokens()
         await self._conn.executescript(_SCHEMA)
 
     async def _migrate_machines(self) -> None:
@@ -167,6 +204,16 @@ class Db:
         rows = await self._conn.execute_fetchall("PRAGMA table_info(machines);")
         existing = {row[1] for row in rows}
         for column, ddl in _COLUMN_MIGRATIONS.items():
+            if column not in existing:
+                await self._conn.execute(ddl)
+
+    async def _migrate_tokens(self) -> None:
+        """Añade `tokens.kind` (FR-10b) a DBs anteriores al epic 3."""
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        rows = await self._conn.execute_fetchall("PRAGMA table_info(tokens);")
+        existing = {row[1] for row in rows}
+        for column, ddl in _TOKEN_COLUMN_MIGRATIONS.items():
             if column not in existing:
                 await self._conn.execute(ddl)
 
@@ -211,6 +258,7 @@ class Db:
             Machine(
                 id=r[0], ip=r[1], mac=r[2], hostname=r[3], state=r[4],
                 status_checked_at=r[5], fingerprint=r[6], remote_user=r[7],
+                last_origin=r[8], last_change_at=r[9],
             )
             for r in rows
         ]
@@ -226,6 +274,7 @@ class Db:
         return Machine(
             id=r[0], ip=r[1], mac=r[2], hostname=r[3], state=r[4],
             status_checked_at=r[5], fingerprint=r[6], remote_user=r[7],
+            last_origin=r[8], last_change_at=r[9],
         )
 
     async def set_managed(self, machine_id: int, fingerprint: str, remote_user: str) -> None:
@@ -244,17 +293,38 @@ class Db:
             _SET_MANAGED, (fingerprint, remote_user, _now_iso(), machine_id)
         )
 
-    async def set_no_fiable(self, machine_id: int) -> None:
-        """Marca la máquina `no_fiable` (fingerprint actual != fijado, AD-2/AD-10)."""
-        if self._conn is None:
-            raise RuntimeError("db no inicializado: llamar init_db() primero")
-        await self._conn.execute(_SET_NO_FIABLE, (_now_iso(), machine_id))
+    async def set_no_fiable(self, machine_id: int, origin: str = "api") -> None:
+        """Marca la máquina `no_fiable` (fingerprint actual != fijado, AD-2/AD-10).
 
-    async def set_state(self, machine_id: int, state: str) -> None:
-        """Escribe el estado persistido de la máquina (sin TTL; epic 2)."""
+        `origin` (epic 3) queda registrado como último cambio de estado para el
+        fallback de polling de la app (`last_origin`/`last_change_at`).
+        """
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
-        await self._conn.execute(_SET_STATE, (state, _now_iso(), machine_id))
+        stamp = _now_iso()
+        await self._conn.execute(_SET_NO_FIABLE, (stamp, origin, stamp, machine_id))
+
+    async def set_state(self, machine_id: int, state: str, origin: str = "api") -> None:
+        """Escribe el estado persistido de la máquina (sin TTL; epic 2).
+
+        `origin` (epic 3) se registra como origen del último cambio de estado.
+        """
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        stamp = _now_iso()
+        await self._conn.execute(_SET_STATE, (state, stamp, origin, stamp, machine_id))
+
+    async def set_last_change(self, machine_id: int, origin: str) -> None:
+        """Marca el origen del último cambio de la máquina (epic 3, FR-18).
+
+        Lo usan las acciones de control (wake/shutdown/enroll) para que el
+        fallback de polling de la app (`last_origin`/`last_change_at`) vea el
+        origen `mcp` aunque el stream SSE esté caído. No toca el estado.
+        """
+        if self._conn is None:
+            raise RuntimeError("db no inicializado: llamar init_db() primero")
+        stamp = _now_iso()
+        await self._conn.execute(_SET_LAST_CHANGE, (origin, stamp, machine_id))
 
     async def record_key(self, machine_id: int, algorithm: str, fingerprint_sha256: str) -> None:
         """Registra el par de claves + fingerprint instalado en el alta (tabla `keys`).
@@ -327,34 +397,58 @@ class Db:
             return None
         return row[0][0], row[0][1]
 
-    async def set_status(self, ip: str, state: str) -> None:
+    async def set_status(self, ip: str, state: str, origin: str = "periodic") -> bool:
         """Guarda el estado comprobado SIN commit: lo decide quien gestiona la
         transacción (StatusService.check_all). UPDATE directo: solo toca estado
         y marca; nunca inserta filas ni altera `updated_at`. NUNCA sobrescribe
         una fila `no_fiable` (AD-10/AD-2): el mismatch de fingerprint debe
         sobrevivir a los barridos del loop de estado. Si la IP no existe en el
-        inventario, no hace nada."""
+        inventario, no hace nada.
+
+        `origin` (epic 3) queda registrado como origen del último cambio de
+        estado (fallback de polling de la app).
+
+        Devuelve `True` si el UPDATE afectó a una fila: la guarda `no_fiable`
+        (u otra escritura concurrente) puede hacer que no toque nada, y el
+        llamador no debe emitir actividad/evento de una transición no persistida.
+        """
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
-        await self._conn.execute(
+        stamp = _now_iso()
+        # Los `state != ?` de los CASE se evalúan sobre la fila previa (SQLite
+        # usa los valores antiguos en el SET): la marca de origen solo avanza en
+        # una transición real.
+        cursor = await self._conn.execute(
             _UPSERT_STATUS,
-            (state, _now_iso(), ip),
+            (state, stamp, state, origin, state, stamp, ip),
         )
+        return cursor.rowcount > 0
 
-    async def create_token(self, device_name: str, token_sha256: str) -> None:
-        """Registra un token por su hash (AD-6). El token plano no toca la BD."""
+    async def create_token(
+        self, device_name: str, token_sha256: str, kind: str = "device"
+    ) -> None:
+        """Registra un token por su hash (AD-6). El token plano no toca la BD.
+
+        `kind` (`device`|`mcp`) discrimina la superficie que abre el token
+        (FR-10b, epic 3); default `device` para no romper llamadas existentes.
+        """
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
         await self._conn.execute(
-            _INSERT_TOKEN, (device_name, token_sha256, _now_iso(), None)
+            _INSERT_TOKEN, (device_name, token_sha256, _now_iso(), None, kind)
         )
 
-    async def token_exists(self, token_sha256: str) -> bool:
-        """¿Hay un token activo (no revocado) con este hash?"""
+    async def token_exists(self, token_sha256: str, kind: str = "device") -> bool:
+        """¿Hay un token activo (no revocado) de este `kind` con este hash?
+
+        El `kind` es parte de la comprobación: un token de dispositivo no vale
+        como token MCP y viceversa (FR-10b); default `device` para no romper las
+        llamadas de la infraestructura de auth existente.
+        """
         if self._conn is None:
             raise RuntimeError("db no inicializado: llamar init_db() primero")
         row = await self._conn.execute_fetchall(
-            _TOKEN_EXISTS, (token_sha256,)
+            _TOKEN_EXISTS, (token_sha256, kind)
         )
         return bool(row)
 
@@ -391,6 +485,7 @@ class Db:
                 token_sha256=r[2],
                 created_at=r[3],
                 revoked_at=r[4],
+                kind=r[5],
             )
             for r in rows
         ]

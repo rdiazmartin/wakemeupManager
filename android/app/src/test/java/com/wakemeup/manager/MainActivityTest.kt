@@ -11,6 +11,10 @@ import com.google.common.truth.Truth.assertThat
 import com.wakemeup.manager.data.local.SecretKeys
 import com.wakemeup.manager.data.local.SecretStore
 import com.wakemeup.manager.data.local.SecureSettingsRepository
+import com.wakemeup.manager.domain.MachineEvent
+import com.wakemeup.manager.notifications.AndroidMachineNotifier
+import com.wakemeup.manager.notifications.MachineNotifier
+import com.wakemeup.manager.notifications.NotificationPermissionPrompt
 import com.wakemeup.manager.ui.theme.WakemeupTheme
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
@@ -21,10 +25,15 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import org.junit.After
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.shadows.ShadowToast
 import org.robolectric.annotation.Config
 
 /**
@@ -40,6 +49,31 @@ class MainActivityTest {
 
     @get:Rule
     val composeRule = createComposeRule()
+
+    /** Doble del notificador: la UI prueba emite los prompts a demanda. */
+    private class FakeNotifier : MachineNotifier {
+        private val prompts =
+            MutableSharedFlow<NotificationPermissionPrompt>(replay = 1, extraBufferCapacity = 1)
+        override val permissionPrompts: SharedFlow<NotificationPermissionPrompt> = prompts
+
+        fun emit(prompt: NotificationPermissionPrompt) {
+            prompts.tryEmit(prompt)
+        }
+
+        override fun notify(event: MachineEvent) = Unit
+    }
+
+    private val fakeNotifier = FakeNotifier()
+
+    @Before
+    fun installNotifier() {
+        MainActivity.notifierFactory = { fakeNotifier }
+    }
+
+    @After
+    fun restoreNotifier() {
+        MainActivity.notifierFactory = { ctx -> AndroidMachineNotifier(ctx.applicationContext) }
+    }
 
     private class InMemorySecretStore : SecretStore {
         private val map = mutableMapOf<String, String>()
@@ -200,5 +234,45 @@ class MainActivityTest {
         // no al primer arranque (blind-hunter 1.6).
         composeRule.onNodeWithContentDescription("Volver").performClick()
         composeRule.onNodeWithText("Desktop").assertIsDisplayed()
+    }
+
+    @Test
+    fun `prompt REQUEST muestra el dialogo de racional del permiso`() {
+        val store = InMemorySecretStore()
+        val repo = configure(store)
+
+        composeRule.setContent {
+            WakemeupTheme {
+                AppRoot(settings = repo, client = okMachinesApi())
+            }
+        }
+        composeRule.onNodeWithText("Desktop").assertIsDisplayed()
+
+        fakeNotifier.emit(NotificationPermissionPrompt.REQUEST)
+        composeRule.waitForIdle()
+
+        // FR-18: se pide POST_NOTIFICATIONS con explicación al primer evento mcp.
+        composeRule.onNodeWithText("Activar notificaciones").assertIsDisplayed()
+        composeRule.onNodeWithText("Ahora no").assertIsDisplayed()
+    }
+
+    @Test
+    fun `prompt SETTINGS muestra el aviso de activarlas en ajustes`() {
+        val store = InMemorySecretStore()
+        val repo = configure(store)
+
+        composeRule.setContent {
+            WakemeupTheme {
+                AppRoot(settings = repo, client = okMachinesApi())
+            }
+        }
+        composeRule.onNodeWithText("Desktop").assertIsDisplayed()
+
+        fakeNotifier.emit(NotificationPermissionPrompt.SETTINGS)
+        composeRule.waitForIdle()
+
+        // Permiso ya denegado: no se vuelve a pedir; se sugiere ajustes.
+        assertThat(ShadowToast.getTextOfLatestToast())
+            .contains("Notificaciones desactivadas")
     }
 }

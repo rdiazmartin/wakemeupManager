@@ -17,7 +17,9 @@ import logging
 from wakemeup.adapters.db import Db
 from wakemeup.adapters.net import Net
 from wakemeup.adapters.ssh import AuthFailedError, Ssh, SshError
+from wakemeup.core.models import Event
 from wakemeup.services.activity import ActivityService
+from wakemeup.services.events import EventBus
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +40,14 @@ class EnrollmentService:
     """Alta de una máquina descubierta: SSH + fingerprint + authorized_keys."""
 
     def __init__(
-        self, db: Db, net: Net, ssh: Ssh, activity: ActivityService
+        self, db: Db, net: Net, ssh: Ssh, activity: ActivityService,
+        events: EventBus | None = None,
     ) -> None:
         self._db = db
         self._net = net
         self._ssh = ssh
         self._activity = activity
+        self._events = events
 
     async def enroll(
         self,
@@ -117,8 +121,26 @@ class EnrollmentService:
         except Exception:
             await self._db.rollback()
             raise
+        self._publish(channel, machine)
         logger.info("máquina %s dada de alta (fingerprint %s)", machine.ip, fingerprint)
         return {"id": machine_id, "managed": True}
+
+    def _publish(self, channel: str, machine) -> None:
+        """Emite `enroll_done` con el origen del canal (AD-11, epic 3)."""
+        if self._events is None:
+            return
+        from datetime import datetime, timezone
+
+        self._events.publish(
+            Event(
+                type="enroll_done",
+                machine=machine.hostname or machine.ip,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                origin=channel,
+                machine_id=machine.id,
+                machine_ip=machine.ip,
+            )
+        )
 
     async def _record(self, channel: str, token: str, machine, operation: str, result: str) -> None:
         """Registra la entrada de actividad en su propia transacción (FR-11).

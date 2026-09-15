@@ -203,6 +203,103 @@ async def test_current_task_reflects_live_scan_including_upsert(db):
 
 
 @pytest.mark.asyncio
+async def test_scan_done_emitted_with_forced_origin(db):
+    """3.3: el escaneo forzado por API emite `scan_done` con origen `scan`."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    net = FakeNet([HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10")])
+    svc = DiscoveryService(net=net, db=db, scan=ScanSettings(), events=bus)
+
+    async with bus.subscribe() as queue:
+        await svc.scan(origin="scan")
+        event = queue.get_nowait()
+    assert event.type == "scan_done"
+    assert event.origin == "scan"
+    assert set(event.to_payload()) == {"type", "machine", "timestamp", "origin"}
+
+
+@pytest.mark.asyncio
+async def test_scan_persists_activity_with_origin_as_channel(db):
+    """FR-11: el escaneo completado deja una entrada `scan` con el canal del origen."""
+    from wakemeup.services.activity import ActivityService
+
+    net = FakeNet(
+        [
+            HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10"),
+            HostInfo(ip="192.168.1.11", mac="aa:bb:cc:dd:ee:11"),
+        ]
+    )
+    svc = DiscoveryService(
+        net=net, db=db, scan=ScanSettings(), activity=ActivityService(db)
+    )
+    await svc.scan(origin="mcp")
+
+    entries = await db.list_activity(limit=5)
+    assert len(entries) == 1
+    assert entries[0].operation == "scan"
+    assert entries[0].channel == "mcp"  # el origen se guarda como canal
+    assert entries[0].result == "2"  # nº de hosts descubiertos
+    assert entries[0].machine_id is None
+    # El INSERT abrió/cerró su transacción: el siguiente begin() no falla.
+    await db.begin()
+    await db.set_status("192.168.1.10", "online")
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_scan_without_activity_service_still_works(db):
+    """`activity` es opcional: los tests/constructores antiguos siguen valiendo."""
+    net = FakeNet([HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10")])
+    svc = DiscoveryService(net=net, db=db, scan=ScanSettings())
+    assert await svc.scan() == 1
+    assert await db.list_activity(limit=5) == []
+
+
+@pytest.mark.asyncio
+async def test_scan_done_emitted_with_mcp_origin(db):
+    """3.3: `force_scan` del MCP propaga `origin='mcp'` al evento `scan_done`."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    net = FakeNet([HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10")])
+    svc = DiscoveryService(net=net, db=db, scan=ScanSettings(), events=bus)
+
+    async with bus.subscribe() as queue:
+        await svc.scan(origin="mcp")
+        event = queue.get_nowait()
+    assert event.type == "scan_done"
+    assert event.origin == "mcp"
+
+
+@pytest.mark.asyncio
+async def test_periodic_scan_emits_scan_done_periodic(db):
+    """3.3: el escaneo del loop periódico emite `scan_done` con origen `periodic`."""
+    from wakemeup.services.events import EventBus
+
+    bus = EventBus()
+    net = FakeNet([HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10")])
+    svc = DiscoveryService(
+        net=net, db=db, scan=ScanSettings(interval_seconds=1, ttl_seconds=60), events=bus
+    )
+    async with bus.subscribe() as queue:
+        task = svc.periodic_task()
+        try:
+            deadline = asyncio.get_running_loop().time() + 3
+            event = None
+            while asyncio.get_running_loop().time() < deadline and event is None:
+                try:
+                    event = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    assert event is not None and event.origin == "periodic"
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_periodic_loop(db):
     """stop() (verification-gap 1.4): cancela el loop periódico real."""
     net = FakeNet([HostInfo(ip="192.168.1.10", mac="aa:bb:cc:dd:ee:10")])

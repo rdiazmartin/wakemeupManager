@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-13-2026 16:27
-last_updated: 09-14-2026 14:20
+last_updated: 09-15-2026 15:30
 project: wakemeupManager
 project_key: NOKEY
 tracking_system: file-system
@@ -52,12 +52,12 @@ development_status:
   2-5-gestión-de-tokens-y-registro-de-actividad-cli-logs: done
   epic-2-retrospective: optional
 
-  epic-3: backlog
-  3-1-servidor-mcp-con-tools-de-lectura-y-control: backlog
-  3-2-autenticación-y-alcance-del-mcp-token-dedicado-solo-tailnet: backlog
-  3-3-bus-de-eventos-stream-sse-en-el-be-ad-11: backlog
-  3-4-suscripción-sse-en-la-app-con-fallback-de-polling: backlog
-  3-5-notificación-del-sistema-para-cambios-del-mcp: backlog
+  epic-3: done
+  3-1-servidor-mcp-con-tools-de-lectura-y-control: done
+  3-2-autenticación-y-alcance-del-mcp-token-dedicado-solo-tailnet: done
+  3-3-bus-de-eventos-stream-sse-en-el-be-ad-11: done
+  3-4-suscripción-sse-en-la-app-con-fallback-de-polling: done
+  3-5-notificación-del-sistema-para-cambios-del-mcp: done
   epic-3-retrospective: optional
 
   epic-4: backlog
